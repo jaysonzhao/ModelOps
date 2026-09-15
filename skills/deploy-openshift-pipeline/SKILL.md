@@ -7,7 +7,7 @@ compatibility: Requires oc CLI, OpenShift cluster with Tekton Pipelines operator
 # Deploy OpenShift Pipeline
 
 Deploys the ModelOps LLM onboarding pipeline end-to-end:
-compliance/artifact scan → GPU advisor → GPU sharing → deploy → security scan → teardown → staging advisor → human approval → staging deploy → benchmark → registry update → (optional) MaaS production deploy.
+compliance/artifact scan → GPU advisor → GPU sharing → deploy → prompt_injection (passthrough) → prompt_injection (DeBERTa) → teardown → staging advisor → human approval → staging deploy → benchmark → registry update → (optional) MaaS production deploy.
 
 ## Prerequisites
 
@@ -43,13 +43,13 @@ If your GPU Operator namespace is not `nvidia-gpu-operator`, edit the Role/RoleB
 
 ### 3b. EvalHub evaluations RBAC
 
-Required so the pipeline SA can submit/poll garak and GuideLLM jobs (EvalHub SAR on `trustyai.opendatahub.io/evaluations`):
+Required so the pipeline SA can submit/poll GuideLLM jobs (EvalHub SAR on `trustyai.opendatahub.io/evaluations`):
 
 ```bash
 oc apply -f model_onboarding_pipeline/model-intake-pipeline/pipeline/evalhub-rbac.yaml
 ```
 
-Without this, `security-scan` fails with `403 Forbidden (user=system:serviceaccount:vllm:pipeline, verb=create, resource=evaluations)`.
+Without this, `benchmark` fails with `403 Forbidden (user=system:serviceaccount:vllm:pipeline, verb=create, resource=evaluations)`. Prompt-injection gates do not create EvalHub jobs.
 
 ### 4. Create ConfigMaps for lm-eval
 
@@ -108,7 +108,10 @@ oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/gpu
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/approval-gate-task.yaml
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/apply-gpu-sharing-task.yaml
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/deploy-model-task.yaml
+oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/nemo-guardrails-rbac.yaml
+oc apply -f model_onboarding_pipeline/evalhub/nemo-guardrails-config.yaml
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/security-scan-task.yaml
+oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/guardrail-eval-task.yaml
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/teardown-model-task.yaml
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/grant-model-access-task.yaml
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/guidellm-benchmark-task.yaml
@@ -135,7 +138,7 @@ Manual alternative:
 oc create -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/model-intake-pipelinerun.yaml
 ```
 
-`generateName` requires `oc create` (`oc apply` is rejected). The sample run uses Garak profiles `quality,avid_security,cwe` (not the empty `quick` smoke test).
+`generateName` requires `oc create` (`oc apply` is rejected). The sample run's security gates are the unified prompt_injection test (passthrough then DeBERTa), not Garak.
 
 Monitor:
 
@@ -153,7 +156,7 @@ Check all TaskRuns succeed in order:
 oc get taskrun -n vllm --sort-by=.metadata.creationTimestamp
 ```
 
-Expected order: `compliance-artifact-scan`, `gpu-advisor-sandbox`, `apply-gpu-sharing-sandbox`, `deploy-model`, `security-scan`, `teardown-model`, `gpu-advisor-staging`, `wait-for-approval`, `apply-gpu-sharing-staging`, `deploy-model-staging`, `benchmark`, `upload-guide-llm-results`, `register-model-and-results`, `deploy-maas` (if enabled).
+Expected order: `compliance-artifact-scan`, `gpu-advisor-sandbox`, `apply-gpu-sharing-sandbox`, `deploy-model`, `security-scan` (prompt_injection without rails / passthrough), `security-scan-guardrail` (same prompt_injection test with DeBERTa rails), `teardown-model`, `gpu-advisor-staging`, `wait-for-approval`, `apply-gpu-sharing-staging`, `deploy-model-staging`, `benchmark`, `upload-guide-llm-results`, `register-model-and-results`, `deploy-maas` (if enabled).
 
 Inspect model registry:
 
@@ -171,6 +174,9 @@ oc run -n vllm mr-show --image=registry.access.redhat.com/ubi9/ubi-minimal --rm 
 - **wait-for-approval stuck**: Confirm `approval-api-url` points to the in-cluster Service DNS (`http://model-intake.<ns>.svc.cluster.local:8080`), NOT the public Route.
 - **Time-slicing persists cluster-wide** after the pipeline. To revert: see `references/gpu-sharing.md`.
 - **lm-eval tasks are disabled by default** (commented out in the Pipeline). Re-enable by uncommenting in `model-intake-pipeline.yaml`.
+- **`registry.access.redhat.com` 502 / pod not found**: `:latest` defaults to Always-pull. `deploy-model` and `guardrail-eval` set `imagePullPolicy: IfNotPresent`, and the deploy/scan pipeline tasks retry 3 times. The UI "pod not found" message usually means Tekton failed the TaskRun on the first ErrImagePull and deleted the pod.
+- **NemoGuardrails `/v1/guardrail/checks` status=error about `openai_api_base`**: Classifier-only configs must use `models: []` (no LLM wrap). Config names must be RFC-1123 (use `deberta`, not `prompt_injection_deberta`).
+- **EvalHub `quay.io/eval-hub/community-nemo-guardrails` ErrImagePull**: The community adapter is not publicly pullable. The onboarding gate does not use it; it scores the live NemoGuardrails Service.
 
 ## References
 

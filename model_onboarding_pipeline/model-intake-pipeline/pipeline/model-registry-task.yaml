@@ -89,7 +89,9 @@ spec:
         echo "s3 UI route:            ${S3_ROUTE:-<none>}"
         # Read evalhub job IDs from workspace files written by upstream tasks
         cat "$WS/garak-evalhub-job-id.txt" 2>/dev/null > "$WS/evalhub-garak-job-id.txt" || true
+        cat "$WS/garak-guardrail-evalhub-job-id.txt" 2>/dev/null > "$WS/evalhub-garak-guardrail-job-id.txt" || true
         cat "$WS/guidellm-evalhub-job-id.txt" 2>/dev/null > "$WS/evalhub-guidellm-job-id.txt" || true
+        cat "$WS/guardrail-evalhub-job-id.txt" 2>/dev/null > "$WS/evalhub-guardrail-job-id.txt" || true
     - name: update-registry
       image: registry.access.redhat.com/ubi9/python-311
       workingDir: $(workspaces.shared-workspace.path)
@@ -141,7 +143,11 @@ spec:
         bench_ui = read("benchmarkui-route.txt")
         s3_ui = read("s3ui-route.txt")
         garak_job_id = read("evalhub-garak-job-id.txt")
+        garak_guardrail_job_id = read("evalhub-garak-guardrail-job-id.txt")
         guidellm_job_id = read("evalhub-guidellm-job-id.txt")
+        guardrail_job_id = read("evalhub-guardrail-job-id.txt")
+        guardrail_ts = read("guardrail-timestamp.txt")
+        garak_guardrail_ts = read("garak-guardrail-timestamp.txt")
         console_domain = os.environ.get("OPENSHIFT_CONSOLE_DOMAIN", "").strip().rstrip("/")
         tenant_ns = os.environ.get("TENANT_NS", "").strip()
 
@@ -179,9 +185,23 @@ spec:
         if garak_job_id and console_domain and tenant_ns:
             props["evalhub-garak-results"] = "https://{}/evaluation/{}/results/{}".format(
                 console_domain, tenant_ns, garak_job_id)
+        if garak_guardrail_ts and bench_ui:
+            gg_file = "{}_security_scan_guardrail/scan_results.summary.json".format(garak_guardrail_ts)
+            props["garak-guardrail-results-ui"] = "https://{}/?file={}&bucket=security-scan-results".format(
+                bench_ui, gg_file)
+        if garak_guardrail_job_id and console_domain and tenant_ns:
+            props["evalhub-garak-guardrail-results"] = "https://{}/evaluation/{}/results/{}".format(
+                console_domain, tenant_ns, garak_guardrail_job_id)
         if guidellm_job_id and console_domain and tenant_ns:
             props["evalhub-guidellm-results"] = "https://{}/evaluation/{}/results/{}".format(
                 console_domain, tenant_ns, guidellm_job_id)
+        if guardrail_ts and bench_ui:
+            guardrail_file = "{}_guardrail_eval/guardrail_eval.summary.json".format(guardrail_ts)
+            props["guardrail-results-ui"] = "https://{}/?file={}&bucket=security-scan-results".format(
+                bench_ui, guardrail_file)
+        if guardrail_job_id and console_domain and tenant_ns:
+            props["evalhub-guardrail-results"] = "https://{}/evaluation/{}/results/{}".format(
+                console_domain, tenant_ns, guardrail_job_id)
 
         with open("/tmp/mr_props.json", "w") as f:
             json.dump(props, f)

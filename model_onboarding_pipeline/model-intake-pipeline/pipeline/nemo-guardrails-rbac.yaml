@@ -1,0 +1,30 @@
+# FILE: nemo-guardrails-rbac.yaml
+# Pipeline SA needs to create/patch NemoGuardrails CRs and their ConfigMaps
+# so the guardrail-eval task can wrap the sandbox model.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: modelops-nemo-guardrails
+  namespace: vllm
+rules:
+  - apiGroups: ["trustyai.opendatahub.io"]
+    resources: ["nemoguardrails"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "services", "pods", "endpoints"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: modelops-nemo-guardrails
+  namespace: vllm
+subjects:
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: vllm
+roleRef:
+  kind: Role
+  name: modelops-nemo-guardrails
+  apiGroup: rbac.authorization.k8s.io

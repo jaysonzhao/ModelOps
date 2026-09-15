@@ -14,6 +14,7 @@ spec:
     - guidellm
     - lighteval
     - ibm-clear
+    - nemo-guardrails
   collections:
     - leaderboard-v2
     - safety-and-fairness-v1

@@ -1,0 +1,69 @@
+# NeMo Guardrails config used by the onboarding pipeline.
+# DeBERTa prompt-injection rail from:
+# https://developers.redhat.com/articles/2026/09/01/developing-llm-guardrail-configs-locally-with-nemo-guardrails
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemo-prompt-injection-deberta
+  namespace: vllm
+  labels:
+    app.kubernetes.io/part-of: modelops
+    modelops.guardrail: prompt-injection-deberta
+data:
+  config.yaml: |
+    models: []
+    rails:
+      input:
+        flows:
+          - hf classifier check input $classifier="prompt_injection"
+      config:
+        hf_classifier:
+          prompt_injection:
+            engine: local
+            model: "protectai/deberta-v3-base-prompt-injection-v2"
+            task: text-classification
+            threshold: 0.5
+            blocked_labels:
+              - "INJECTION"
+  rails.co: |
+    # built-in hf classifier rails
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemo-passthrough
+  namespace: vllm
+  labels:
+    app.kubernetes.io/part-of: modelops
+    modelops.guardrail: passthrough
+data:
+  config.yaml: |
+    models: []
+    rails:
+      input:
+        flows: []
+  rails.co: |
+    # no input rails (baseline)
+---
+# Optional live wrap of the sandbox model. The guardrail-eval task
+# deploys per-model CRs (unguarded passthrough vs DeBERTa) and scores
+# POST /v1/guardrail/checks.
+apiVersion: trustyai.opendatahub.io/v1alpha1
+kind: NemoGuardrails
+metadata:
+  name: modelops-guardrails
+  namespace: vllm
+  annotations:
+    security.opendatahub.io/enable-auth: "false"
+spec:
+  replicas: 1
+  nemoConfigs:
+    # Name must be RFC-1123 (no underscores): the operator uses it in a volume name.
+    - name: deberta
+      default: true
+      configMaps:
+        - nemo-prompt-injection-deberta
+  env:
+    - name: OPENAI_API_KEY
+      value: not-used

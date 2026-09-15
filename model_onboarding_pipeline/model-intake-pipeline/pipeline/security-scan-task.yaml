@@ -5,8 +5,9 @@ metadata:
   namespace: vllm
 spec:
   description: |
-    Submit a garak security scan via EvalHub, wait for completion, download
-    results, upload to S3, update the Model Registry, and gate on pass/fail.
+    Garak security scan WITHOUT guardrails. Hits the raw model OpenAI endpoint
+    via EvalHub. Pair with security-scan-guardrail (guardrail-eval Task), which
+    scores the NeMo Guardrails config via the EvalHub nemo-guardrails provider.
   params:
     - name: target
       type: string
@@ -14,6 +15,10 @@ spec:
     - name: model-name
       type: string
       description: "Model name for identification."
+    - name: scan-label
+      type: string
+      default: "without-guardrail"
+      description: "Artifact/job label. Default without-guardrail (raw model)."
     - name: evalhub-url
       type: string
       description: "EvalHub base URL (e.g. evalhub-redhat-ods-applications.apps.<cluster>)."
@@ -99,6 +104,8 @@ spec:
           value: $(params.target)
         - name: MODEL_NAME
           value: $(params.model-name)
+        - name: SCAN_LABEL
+          value: $(params.scan-label)
         - name: SEVERITY_THRESHOLD
           value: $(params.severity-threshold)
         - name: GARAK_BENCHMARKS
@@ -129,8 +136,9 @@ spec:
         #!/usr/bin/env bash
         set -euo pipefail
 
-        echo "--- EvalHub Garak Security Scan ---"
+        echo "--- EvalHub Garak Security Scan (WITHOUT guardrail) ---"
         echo "Model: $MODEL_NAME"
+        echo "Scan label: ${SCAN_LABEL:-without-guardrail}"
         echo "Target: $TARGET_URL"
         echo "EvalHub: $EVALHUB_URL"
         echo "Tenant: $TENANT_NS"
@@ -154,6 +162,7 @@ spec:
         tenant_ns = os.environ["TENANT_NS"]
         target = os.environ["TARGET_URL"]
         model_name = os.environ["MODEL_NAME"]
+        scan_label = os.environ.get("SCAN_LABEL", "without-guardrail").strip() or "without-guardrail"
         threshold = os.environ.get("SEVERITY_THRESHOLD", "block").lower()
         ws = os.environ["WORKSPACE_PATH"]
 
@@ -336,7 +345,7 @@ spec:
                 },
             })
         payload = {
-            "name": "{}-garak-scan".format(model_name),
+            "name": "{}-garak-scan-{}".format(model_name, scan_label),
             "model": {
                 "url": target,
                 "name": model_name,
@@ -469,6 +478,7 @@ spec:
         machine = {
             "timestamp": TIMESTAMP,
             "model": model_name,
+            "scan_label": scan_label,
             "target": target,
             "evalhub_job_id": job_id,
             "profiles": profile_ids,

@@ -1,0 +1,9 @@
+.DS_Store
+.env
+.env.*
+*.pem
+credentials.json
+__pycache__/
+*.pyc
+.idea/
+.vscode/

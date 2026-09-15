@@ -162,7 +162,10 @@
                     <span style="color:var(--color-success);font-weight:700">&#10003;</span> License evaluation
                 </div>
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                    <span style="color:var(--color-success);font-weight:700">&#10003;</span> Garak security evaluation
+                    <span style="color:var(--color-success);font-weight:700">&#10003;</span> Garak without guardrail
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                    <span style="color:var(--color-success);font-weight:700">&#10003;</span> Garak with guardrail
                 </div>
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
                     <span style="color:var(--color-success);font-weight:700">&#10003;</span> Capacity benchmark
@@ -300,6 +303,18 @@
                     <label>Garak Profiles</label>
                     <input type="text" name="garak-benchmarks" placeholder="quality,avid_security,cwe">
                     <small>EvalHub Garak profile IDs. Default: quality, avid_security, cwe. Avoid <code>quick</code> (empty DAN smoke).</small>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Guardrail Benchmarks</label>
+                    <input type="text" name="guardrail-benchmarks" placeholder="prompt_injection">
+                    <small>EvalHub NeMo Guardrails benchmarks. Default: <code>prompt_injection</code>. Optional: <code>toxicity</code>.</small>
+                </div>
+                <div class="form-group">
+                    <label>NeMo Config</label>
+                    <input type="text" name="guardrail-nemo-config" placeholder="prompt_injection_deberta">
+                    <small>Passed as <code>parameters.nemo_config</code>. Default DeBERTa classifier from the Red Hat articles.</small>
                 </div>
             </div>
             <div class="form-group">

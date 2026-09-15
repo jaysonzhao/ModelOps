@@ -1,6 +1,10 @@
 # ModelOps
 
-End-to-end LLM onboarding on OpenShift (sandbox scan → approval → staging → registry → optional MaaS).
+End-to-end LLM onboarding on OpenShift.
+
+Sandbox: compliance scan → GPU plan → deploy → prompt_injection
+(passthrough) → prompt_injection (DeBERTa) → teardown → approval →
+staging deploy → GuideLLM benchmark → registry → optional MaaS.
 
 ```bash
 # Logged in with oc, cluster-admin recommended:
@@ -8,3 +12,9 @@ End-to-end LLM onboarding on OpenShift (sandbox scan → approval → staging �
 ./deploy-all.sh --skip-maas          # omit Models-as-a-Service
 ./deploy-all.sh --skip-maas --skip-build
 ```
+
+Both security gates use the same labeled jailbreak vs benign set scored
+through `POST /v1/guardrail/checks` on a live NemoGuardrails Service.
+
+- `security-scan` — passthrough rails, min-accuracy 0 (baseline)
+- `security-scan-guardrail` — DeBERTa rails, min-accuracy 0.80

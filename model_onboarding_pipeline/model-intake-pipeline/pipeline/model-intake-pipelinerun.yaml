@@ -59,6 +59,17 @@ spec:
       value: 'quality,avid_security,cwe'
     - name: garak-poll-timeout-seconds
       value: '7200'
+    # NeMo Guardrails (EvalHub, article-aligned)
+    - name: guardrail-benchmarks
+      value: 'prompt_injection'
+    - name: guardrail-nemo-config
+      value: 'prompt_injection_deberta'
+    - name: guardrail-min-accuracy
+      value: '0.80'
+    - name: deploy-guardrails
+      value: 'true'
+    - name: guardrail-poll-timeout-seconds
+      value: '1800'
     # EvalHub
     - name: evalhub-url
       value: 'evalhub-redhat-ods-applications.apps.cluster-fz7vw.fz7vw.sandbox5177.opentlc.com'
@@ -128,6 +139,14 @@ spec:
         cpu: "2"
         memory: "4Gi"
   - pipelineTaskName: security-scan
+    computeResources:
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+  - pipelineTaskName: security-scan-guardrail
     computeResources:
       requests:
         cpu: "1"

@@ -337,16 +337,19 @@ spec:
         }
 
         def local_recommendation():
-            param_map = {
-                "70b": 70e9, "33b": 33e9, "32b": 32e9, "13b": 13e9,
-                "8b": 8e9, "7b": 7e9, "6.9b": 6.9e9, "3b": 3e9, "2b": 2e9, "1b": 1e9
-            }
-            model_lower = MODEL_ID.lower()
-            param_count = 7e9
-            for k, v in param_map.items():
-                if k in model_lower:
-                    param_count = v
+            # Parse the last explicit size token (Qwen2.5-0.5B -> 0.5b).
+            # Substring checks like "7b" in the name are unsafe: a missing
+            # size defaulted to 7B and blocked this 0.5B model.
+            import re
+            param_count = None
+            for token in reversed(re.findall(r'(\d+(?:\.\d+)?)[bB]', MODEL_ID)):
+                try:
+                    param_count = float(token) * 1e9
                     break
+                except ValueError:
+                    continue
+            if param_count is None:
+                param_count = 7e9
 
             try:
                 from transformers import AutoConfig
@@ -703,11 +706,14 @@ spec:
                 plan["reason"] = "no GPU nodes discovered"
                 return plan
 
-            # Pick the target node: prefer one that already has occupants
-            # (the "existing model" we must co-reside with); else the one with
-            # the least free capacity.
+            # Prefer a node that still has free GPUs. Only plan co-residence
+            # when every card is occupied — otherwise a leftover sandbox
+            # predictor on one node blocks a deploy that could use the other.
+            free_nodes = [(n, d) for n, d in node_gpus.items() if d.get("free", 0) > 0]
             occ_nodes = [(n, d) for n, d in node_gpus.items() if d["occupants"]]
-            if occ_nodes:
+            if free_nodes:
+                node_name, node = max(free_nodes, key=lambda kv: kv[1]["free"])
+            elif occ_nodes:
                 node_name, node = occ_nodes[0]
             else:
                 node_name, node = min(node_gpus.items(), key=lambda kv: kv[1]["free"])
@@ -715,6 +721,12 @@ spec:
             phys_mem = node["physical_memory_gb"]
             existing = node["occupants"]
             n_existing = len(existing)
+
+            # Time-sliced cards with idle slices still count as free capacity.
+            if node.get("free", 0) > 0 and n_existing == 0:
+                plan["reason"] = ("free GPU capacity on {} ({} free); "
+                                  "no sharing required".format(node_name, node["free"]))
+                return plan
 
             has_free_dedicated = (total_free > 0) and (not node["time_sliced"])
             if has_free_dedicated:

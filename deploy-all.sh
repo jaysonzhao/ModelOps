@@ -131,12 +131,21 @@ phase_evalhub() {
     oc patch datasciencecluster "$dsc" --type merge -p \
       '{"spec":{"components":{"trustyai":{"managementState":"Managed","eval":{"lmeval":{"permitCodeExecution":"allow","permitOnline":"allow"}}}}}}' \
       >/dev/null
+    # NeMo Guardrails CRD/controller. Ignore if this cluster's DSC schema
+    # does not expose the field.
+    oc patch datasciencecluster "$dsc" --type merge -p \
+      '{"spec":{"components":{"trustyai":{"nemoGuardrails":{"managementState":"Managed"}}}}}' \
+      >/dev/null 2>&1 || true
+    oc set env deployment/trustyai-service-operator-controller-manager -n "$RHOAI_NS" \
+      NEMO_GUARDRAILS=true >/dev/null 2>&1 || true
     oc rollout restart deployment trustyai-service-operator-controller-manager -n "$RHOAI_NS" 2>/dev/null || true
   fi
 
+  apply "$ROOT/model_onboarding_pipeline/evalhub/evalhub-provider-nemo-guardrails.yaml"
   apply "$ROOT/model_onboarding_pipeline/evalhub/evalhub-cr.yaml"
   oc wait -n "$RHOAI_NS" --for=condition=Ready evalhub.trustyai.opendatahub.io/evalhub --timeout=180s || \
     warn "EvalHub CR not Ready yet; continuing"
+  ok "EvalHub is installed for GuideLLM. Prompt-injection gates hit live NemoGuardrails /v1/guardrail/checks (not the community EvalHub adapter image)."
 }
 
 # ---------------------------------------------------------------------------
@@ -376,6 +385,13 @@ phase_pipeline() {
 
   apply "$ROOT/model_onboarding_pipeline/model-intake-pipeline/pipeline/gpu-sharing-rbac.yaml"
   apply "$ROOT/model_onboarding_pipeline/model-intake-pipeline/pipeline/evalhub-rbac.yaml"
+  apply "$ROOT/model_onboarding_pipeline/model-intake-pipeline/pipeline/nemo-guardrails-rbac.yaml"
+  if oc get crd nemoguardrails.trustyai.opendatahub.io >/dev/null 2>&1; then
+    oc apply -f "$ROOT/model_onboarding_pipeline/evalhub/nemo-guardrails-config.yaml" || \
+      warn "NemoGuardrails CR not applied"
+  else
+    warn "NemoGuardrails CRD not installed; live model wrap will be skipped"
+  fi
   apply "$ROOT/model_onboarding_pipeline/model-intake-pipeline/pipeline/inferenceservice-rbac.yaml"
   apply "$ROOT/model_onboarding_pipeline/model-intake-pipeline/pipeline/pvc.yaml"
 
@@ -395,6 +411,8 @@ phase_pipeline() {
 
   local pipe="$ROOT/model_onboarding_pipeline/model-intake-pipeline/pipeline"
   local task
+  # security-scan-task.yaml is the unused Garak Task (kept for optional
+  # EvalHub red-team). The pipeline wires both gates to guardrail-eval.
   for task in \
     compliance-artifact-scan-task.yaml \
     gpu-advisor-task.yaml \
@@ -402,6 +420,7 @@ phase_pipeline() {
     apply-gpu-sharing-task.yaml \
     deploy-model-task.yaml \
     security-scan-task.yaml \
+    guardrail-eval-task.yaml \
     teardown-model-task.yaml \
     grant-model-access-task.yaml \
     guidellm-benchmark-task.yaml \
@@ -438,7 +457,10 @@ json.dump(pipe, sys.stdout)
 
   ok "Tasks: $(oc get tasks.tekton.dev -n "$PIPELINE_NS" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
   ok "Pipeline: $(oc get pipeline.tekton.dev -n "$PIPELINE_NS" --no-headers 2>/dev/null | awk '{print $1}')"
-  ok "Garak profiles: quality,avid_security,cwe (override with garak-benchmarks)"
+  ok "Security gates: same prompt_injection allow/block test via /v1/guardrail/checks"
+  ok "  security-scan            = passthrough rails, min-accuracy 0 (baseline)"
+  ok "  security-scan-guardrail  = DeBERTa rails, min-accuracy 0.80"
+  ok "Deploy + scan tasks retry 3 times (registry.access.redhat.com 502 / image pull flakes)"
 }
 
 print_summary() {

@@ -1,6 +1,6 @@
 ---
 name: modelops-tutorial
-description: Deploys and validates the ModelOps LLM onboarding pipeline on OpenShift. Use when setting up the full pipeline, deploying any pipeline component, or troubleshooting pipeline execution. Covers compliance scanning, GPU advisor, human approval, garak security scans, performance benchmarking, Model Registry registration, and MaaS production deployment. Sub-skills handle individual components.
+description: Deploys and validates the ModelOps LLM onboarding pipeline on OpenShift. Use when setting up the full pipeline, deploying any pipeline component, or troubleshooting pipeline execution. Covers compliance scanning, GPU advisor, human approval, unified prompt-injection security scans (without vs with NeMo Guardrails), performance benchmarking, Model Registry registration, and MaaS production deployment. Sub-skills handle individual components.
 license: Proprietary
 metadata:
   version: "2.0"
@@ -14,7 +14,7 @@ The pipeline runs on a single cluster with two namespaces simulating separate en
 - `vllm` — sandbox for automated governance scans
 - `vllm-staging` — staging for human-gated promotion + benchmarking
 
-**Pipeline flow**: compliance/artifact scan → GPU advisor (sandbox) → GPU sharing → deploy → security scan → teardown → GPU advisor (staging) → human approval → GPU sharing (staging) → staging deploy → grant access → benchmark → register model → (optional) MaaS deploy.
+**Pipeline flow**: compliance/artifact scan → GPU advisor (sandbox) → GPU sharing → deploy → prompt_injection scan (passthrough / without rails) → prompt_injection scan (DeBERTa / with rails) → teardown → GPU advisor (staging) → human approval → GPU sharing (staging) → staging deploy → grant access → benchmark → register model → (optional) MaaS deploy.
 
 ## Sub-Skills
 
@@ -24,7 +24,7 @@ Each component is a separate skill loaded on demand. Start with `deploy-openshif
 |-------|------|-------------|
 | `deploy-openshift-pipeline` | `skills/deploy-openshift-pipeline/SKILL.md` | **Start here.** Deploying the full pipeline: namespaces, RBAC, PVC, SA, all Tekton tasks/pipeline, triggering runs. Also: troubleshooting GPU advisor, GPU sharing, compliance scans. |
 | `configure-s3-storage` | `skills/configure-s3-storage/SKILL.md` | Deploying MinIO S3 storage and creating buckets for pipeline scan reports and benchmark results. |
-| `configure-evalhub` | `skills/configure-evalhub/SKILL.md` | Deploying EvalHub (TrustyAI) for garak security scans and GuideLLM benchmarks. Includes smoke tests. Also: garak troubleshooting. |
+| `configure-evalhub` | `skills/configure-evalhub/SKILL.md` | Deploying EvalHub (TrustyAI) for GuideLLM benchmarks. Prompt-injection gates run against live NemoGuardrails `/v1/guardrail/checks`, not the EvalHub community adapter image. |
 | `configure-model-registry` | `skills/configure-model-registry/SKILL.md` | Deploying the OpenShift AI Model Registry (MySQL backend + registry instance). Also: registry connectivity troubleshooting. |
 | `configure-maas-platform` | `skills/configure-maas-platform/SKILL.md` | Full MaaS platform setup: Connectivity Link, Authorino TLS, PostgreSQL, monitoring, Gateway, DataScienceCluster enablement, namespaces, RBAC, routing. Also: DNS hijacking, MaaS troubleshooting. |
 | `deploy-model-intake-ui` | `skills/deploy-model-intake-ui/SKILL.md` | Building and deploying the model intake web app for form-based pipeline run submission and human approval. Also: approval workflow troubleshooting. |

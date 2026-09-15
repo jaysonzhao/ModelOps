@@ -1,0 +1,137 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: qwen25-05b-instruct-onboard-
+  namespace: vllm
+spec:
+  pipelineRef:
+    name: model-intake-pipeline
+  taskRunTemplate:
+    serviceAccountName: pipeline
+  timeouts:
+    pipeline: 8h0m0s
+  workspaces:
+    - name: shared-workspace
+      persistentVolumeClaim:
+        claimName: guidellm-output-pvc
+    - name: manifests
+      configMap:
+        name: mmlu-manifest
+    - name: custom-mmlu
+      configMap:
+        name: custom-mmlu
+  params:
+    - name: model-id
+      value: Qwen/Qwen2.5-0.5B-Instruct
+    - name: model-name
+      value: qwen25-05b-instruct
+    - name: requested-by
+      value: test-guardrail-scan
+    - name: target-namespace
+      value: vllm
+    - name: context-length
+      value: "32768"
+    - name: concurrency
+      value: "4"
+    - name: allow-time-slicing
+      value: "true"
+    - name: allow-mig
+      value: "false"
+    - name: gpu-isolation-policy
+      value: dedicated
+    - name: advisor-endpoint
+      value: ""
+    - name: advisor-secret-name
+      value: gpu-advisor-credentials
+    - name: advisor-timeout-seconds
+      value: "180"
+    - name: approval-api-url
+      value: http://model-intake.vllm.svc.cluster.local:8080
+    - name: approval-poll-interval-seconds
+      value: "15"
+    - name: approval-timeout-seconds
+      value: "3600"
+    - name: release-name
+      value: qwen25-05b-instruct
+    - name: chart-url
+      value: https://redhat-ai-services.github.io/helm-charts/
+    - name: chart-version
+      value: "0.7.1"
+    - name: values-content
+      value: ""
+    - name: gpu-count-override
+      value: ""
+    - name: hardware-profile-name
+      value: gpu
+    - name: hardware-profile-namespace
+      value: redhat-ods-applications
+    - name: severity-threshold
+      value: block
+    - name: garak-benchmarks
+      value: quick
+    - name: garak-probes
+      value: lmrc.Profanity
+    - name: garak-prompt-cap
+      value: "8"
+    - name: garak-parallel-attempts
+      value: "4"
+    - name: garak-poll-timeout-seconds
+      value: "1800"
+    - name: evalhub-url
+      value: evalhub-redhat-ods-applications.apps.cluster-fz7vw.fz7vw.sandbox5177.opentlc.com
+    - name: evalhub-token
+      value: ""
+    - name: tenant-ns
+      value: vllm
+    - name: guardrail-benchmarks
+      value: prompt_injection
+    - name: guardrail-nemo-config
+      value: prompt_injection_deberta
+    - name: guardrail-min-accuracy
+      value: "0.80"
+    - name: guardrail-poll-timeout-seconds
+      value: "1800"
+    - name: openshift-console-domain
+      value: apps.cluster-fz7vw.fz7vw.sandbox5177.opentlc.com
+    - name: guidellm-profile
+      value: constant
+    - name: guidellm-rate
+      value: "4"
+    - name: guidellm-max-seconds
+      value: "60"
+    - name: guidellm-max-requests
+      value: "40"
+    - name: guidellm-prompt-tokens
+      value: "256"
+    - name: guidellm-output-tokens
+      value: "128"
+    - name: guidellm-poll-timeout-seconds
+      value: "2700"
+    - name: custom-data
+      value: "False"
+    - name: custom-filename
+      value: no-file
+    - name: s3-api-endpoint
+      value: http://minio-service.s3-storage.svc.cluster.local:9000
+    - name: s3-access-key-id
+      value: minio
+    - name: s3-secret-access-key
+      value: minio123
+    - name: lm-eval-job-name
+      value: mmlu-jurisprudence-eval-job
+    - name: lm-eval-custom
+      value: "False"
+    - name: deploy-maas
+      value: "false"
+    - name: maas-serving-ns
+      value: llm
+    - name: maas-policy-ns
+      value: models-as-a-service
+    - name: maas-gpu-count
+      value: "1"
+    - name: maas-runtime-image
+      value: registry.redhat.io/rhaii/vllm-cuda-rhel9@sha256:ba060ec145e1b7ac3a3b25b89fc75f7d146746156990ff5858235eaa9d158e32
+    - name: maas-authorized-group
+      value: system:authenticated
+    - name: model-reg-author
+      value: ModelOps Platform Team

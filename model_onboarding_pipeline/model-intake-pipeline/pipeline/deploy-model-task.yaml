@@ -111,6 +111,7 @@ spec:
   steps:
     - name: prepare-values
       image: registry.access.redhat.com/ubi9/python-311
+      imagePullPolicy: IfNotPresent
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: RELEASE_NAME
@@ -338,6 +339,7 @@ spec:
 
     - name: deploy
       image: quay.io/jhurlocker/deploy-model-task-helm-oc:latest
+      imagePullPolicy: IfNotPresent
       workingDir: $(workspaces.shared-workspace.path)
       script: |
         #!/usr/bin/env bash

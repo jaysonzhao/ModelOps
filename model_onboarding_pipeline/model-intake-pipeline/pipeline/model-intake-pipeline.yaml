@@ -16,28 +16,32 @@ spec:
       2. gpu-advisor-sandbox : GPU capacity plan for sandbox deploy.
       3. apply-gpu-sharing-sandbox : enable time-slicing if needed.
       4. deploy-model : deploy via Helm so it can be scanned live.
-      5. security-scan (garak) : live LLM red-team scan via EvalHub using
-         taxonomy profiles (quality, avid_security, cwe by default);
-         UPDATES the registry entry (FAILED-with-links on failure), then gates.
+      5. security-scan (prompt_injection WITHOUT rails) : same NeMo
+         allow/block test as the with-guardrail step, against a passthrough
+         NemoGuardrails config (empty input flows). Records the baseline;
+         min-accuracy 0 so always-allow ~50% does not fail the gate.
+      6. security-scan-guardrail (prompt_injection WITH DeBERTa rails) :
+         identical labeled jailbreak vs benign set (jackhhao plus article
+         examples) via POST /v1/guardrail/checks. Gate on accuracy (>= 0.80).
 
-    Because tasks are chained with runAfter, a failure in either the
-    compliance/artifact scan OR the garak scan halts the pipeline - so the
-    staging phase is reached ONLY when both gates pass.
+    Because tasks are chained with runAfter, a failure in the compliance
+    scan OR either prompt_injection gate halts the pipeline - so the
+    staging phase is reached ONLY when all three gates pass.
 
     PHASE 2 - Promote to staging (namespace: staging-namespace, e.g.
     vllm-staging):
-      6. teardown-model : free the sandbox GPU.
-      7. gpu-advisor-staging : GPU capacity plan for staging.
-      8. wait-for-approval : human approval gate.
-      9. apply-gpu-sharing-staging : enable staging time-slicing if needed.
-      10. deploy-model-staging : deploy via Helm into staging.
-      11. grant-model-access : namespace RBAC for RHOAI dashboard visibility.
-      12. benchmark (GuideLLM via EvalHub) -> upload-guide-llm-results (S3)
-      13. register-model-and-results : UPDATE registry entry with benchmark
+      7. teardown-model : free the sandbox GPU.
+      8. gpu-advisor-staging : GPU capacity plan for staging.
+      9. wait-for-approval : human approval gate.
+      10. apply-gpu-sharing-staging : enable staging time-slicing if needed.
+      11. deploy-model-staging : deploy via Helm into staging.
+      12. grant-model-access : namespace RBAC for RHOAI dashboard visibility.
+      13. benchmark (GuideLLM via EvalHub) -> upload-guide-llm-results (S3)
+      14. register-model-and-results : UPDATE registry entry with benchmark
           + EvalHub links and mark it PRODUCTION-READY.
 
     PHASE 3 - Models-as-a-Service production deployment (optional):
-      14. deploy-maas : deploy the model via MaaS CRDs (LLMInferenceService,
+      15. deploy-maas : deploy the model via MaaS CRDs (LLMInferenceService,
           MaaSModelRef, MaaSAuthPolicy, MaaSSubscription) in the llm
           namespace, behind the MaaS Gateway with API-key auth and rate
           limiting. Toggled by the deploy-maas param (default: false).
@@ -61,7 +65,7 @@ spec:
       type: string
     # Namespaces
     - default: "vllm"
-      description: Sandbox namespace for the compliance/deploy/garak (phase 1) stage
+      description: Sandbox namespace for the compliance/deploy/prompt-injection (phase 1) stage
       name: target-namespace
       type: string
     - default: "vllm-staging"
@@ -140,7 +144,7 @@ spec:
       name: compliance-s3-bucket
       type: string
     - default: "security-scan-results"
-      description: S3 bucket for garak security-scan reports
+      description: S3 bucket for prompt-injection security-scan reports
       name: security-s3-bucket
       type: string
     - default: ""
@@ -248,7 +252,7 @@ spec:
       description: Container image for the vLLM ServingRuntime (sandbox + staging deploys)
       name: serving-runtime-image
       type: string
-    # Gate 3 (phase 1) - Security scan (garak via EvalHub)
+    # Optional leftover Garak params (pipeline no longer taskRefs security-scan)
     - default: "block"
       description: Max tolerated garak attack-success rate before BLOCK (block, high, medium, low)
       name: severity-threshold
@@ -264,6 +268,31 @@ spec:
     - default: "7200"
       description: Seconds to wait for the EvalHub Garak job to finish
       name: garak-poll-timeout-seconds
+      type: string
+    # Gate 3 / 3b - same prompt_injection allow/block test
+    - default: "prompt_injection"
+      description: |
+        Shared NeMo Guardrails benchmark ID for both security-scan
+        (passthrough) and security-scan-guardrail (DeBERTa).
+      name: guardrail-benchmarks
+      type: string
+    - default: "prompt_injection_deberta"
+      description: |
+        NeMo config for the WITH-guardrail scan. security-scan always uses
+        passthrough. Default is the DeBERTa classifier from the local-dev articles.
+      name: guardrail-nemo-config
+      type: string
+    - default: "0.80"
+      description: Minimum accuracy for the WITH-guardrail scan (DeBERTa scored ~0.889). The without-guardrail scan uses 0.
+      name: guardrail-min-accuracy
+      type: string
+    - default: "true"
+      description: Deploy a NemoGuardrails CR (passthrough or DeBERTa) before scoring /v1/guardrail/checks.
+      name: deploy-guardrails
+      type: string
+    - default: "1800"
+      description: Seconds to wait for the prompt_injection scoring step (default 30m).
+      name: guardrail-poll-timeout-seconds
       type: string
     - default: "evalhub-redhat-ods-applications.apps.cluster-fz7vw.fz7vw.sandbox5177.opentlc.com"
       description: EvalHub base URL (host only, no protocol prefix)
@@ -479,7 +508,7 @@ spec:
         - name: shared-workspace
           workspace: shared-workspace
 
-    # --- DEPLOY (sandbox) so the model can be scanned live by garak ---
+    # --- DEPLOY (sandbox) so the model can be scored live ---
     - name: deploy-model
       params:
         - name: releaseName
@@ -511,17 +540,20 @@ spec:
       taskRef:
         kind: Task
         name: deploy-model
+      retries: 3
       workspaces:
         - name: shared-workspace
           workspace: shared-workspace
 
-    # --- GATE 3: Live security scan (garak via EvalHub); updates the registry entry ---
+    # --- GATE 3: prompt_injection WITHOUT rails (passthrough baseline) ---
     - name: security-scan
       params:
         - name: target
           value: "http://$(params.model-name)-predictor.$(params.target-namespace).svc.cluster.local:8080/v1"
         - name: model-name
           value: $(params.model-name)
+        - name: scan-label
+          value: without-guardrail
         - name: model-version
           value: $(params.model-version)
         - name: evalhub-url
@@ -530,12 +562,16 @@ spec:
           value: $(params.evalhub-token)
         - name: tenant-ns
           value: $(params.target-namespace)
-        - name: severity-threshold
-          value: $(params.severity-threshold)
-        - name: garak-benchmarks
-          value: $(params.garak-benchmarks)
+        - name: guardrail-benchmarks
+          value: $(params.guardrail-benchmarks)
+        - name: guardrail-nemo-config
+          value: passthrough
+        - name: guardrail-min-accuracy
+          value: "0"
+        - name: deploy-guardrails
+          value: $(params.deploy-guardrails)
         - name: poll-timeout-seconds
-          value: $(params.garak-poll-timeout-seconds)
+          value: $(params.guardrail-poll-timeout-seconds)
         - name: s3-api-endpoint
           value: $(params.scan-s3-endpoint)
         - name: s3-access-key-id
@@ -552,12 +588,67 @@ spec:
           value: $(params.mr-port)
         - name: model-reg-author
           value: $(params.model-reg-author)
-      timeout: "2h30m0s"
+      timeout: "45m0s"
       runAfter:
         - deploy-model
       taskRef:
         kind: Task
-        name: security-scan
+        name: guardrail-eval
+      retries: 3
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    # --- GATE 3b: prompt_injection WITH DeBERTa rails ---
+    - name: security-scan-guardrail
+      params:
+        - name: target
+          value: "http://$(params.model-name)-predictor.$(params.target-namespace).svc.cluster.local:8080/v1"
+        - name: model-name
+          value: $(params.model-name)
+        - name: scan-label
+          value: with-guardrail
+        - name: model-version
+          value: $(params.model-version)
+        - name: evalhub-url
+          value: $(params.evalhub-url)
+        - name: evalhub-token
+          value: $(params.evalhub-token)
+        - name: tenant-ns
+          value: $(params.target-namespace)
+        - name: guardrail-benchmarks
+          value: $(params.guardrail-benchmarks)
+        - name: guardrail-nemo-config
+          value: $(params.guardrail-nemo-config)
+        - name: guardrail-min-accuracy
+          value: $(params.guardrail-min-accuracy)
+        - name: deploy-guardrails
+          value: $(params.deploy-guardrails)
+        - name: poll-timeout-seconds
+          value: $(params.guardrail-poll-timeout-seconds)
+        - name: s3-api-endpoint
+          value: $(params.scan-s3-endpoint)
+        - name: s3-access-key-id
+          value: $(params.scan-s3-access-key-id)
+        - name: s3-secret-access-key
+          value: $(params.scan-s3-secret-access-key)
+        - name: s3-bucket
+          value: $(params.security-s3-bucket)
+        - name: s3-ui-route
+          value: $(params.s3-ui-route)
+        - name: mr-server
+          value: $(params.mr-server)
+        - name: mr-port
+          value: $(params.mr-port)
+        - name: model-reg-author
+          value: $(params.model-reg-author)
+      timeout: "45m0s"
+      runAfter:
+        - security-scan
+      taskRef:
+        kind: Task
+        name: guardrail-eval
+      retries: 3
       workspaces:
         - name: shared-workspace
           workspace: shared-workspace
@@ -574,7 +665,7 @@ spec:
         - name: namespace
           value: $(params.target-namespace)
       runAfter:
-        - security-scan
+        - security-scan-guardrail
       taskRef:
         kind: Task
         name: teardown-model
@@ -702,6 +793,7 @@ spec:
       taskRef:
         kind: Task
         name: deploy-model
+      retries: 3
       workspaces:
         - name: shared-workspace
           workspace: shared-workspace

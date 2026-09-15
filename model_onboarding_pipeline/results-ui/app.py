@@ -131,6 +131,10 @@ def classify_key(key, bucket=""):
     name = (key or "").lower()
     if "security_scan" in name or name.endswith("scan_results.summary.json") or "garak" in name:
         return "garak"
+    if "guardrail_eval" in name or name.endswith("guardrail_eval.summary.json") or "nemo-guardrails" in name:
+        return "guardrail"
+    if bucket == S3_SECURITY_BUCKET and "guardrail" in name:
+        return "guardrail"
     if bucket == S3_SECURITY_BUCKET:
         return "garak"
     if "lm-eval" in name:
@@ -226,6 +230,8 @@ def provider_from_job(data):
         return "garak"
     if "guidellm" in name:
         return "guidellm"
+    if "guardrail" in name or "nemo-guardrails" in name:
+        return "nemo-guardrails"
     return ""
 
 
@@ -598,6 +604,86 @@ def normalize_garak(data, key, text=""):
     }
 
 
+def normalize_guardrail(data, key, text=""):
+    results = data.get("results") if isinstance(data.get("results"), dict) else {}
+    profiles = data.get("profiles") if isinstance(data.get("profiles"), list) else []
+    if not profiles:
+        for bench in results.get("benchmarks") or data.get("benchmarks") or []:
+            if not isinstance(bench, dict):
+                continue
+            mmap = bench.get("metrics") if isinstance(bench.get("metrics"), dict) else {}
+            profiles.append({
+                "id": bench.get("id") or bench.get("benchmark_id") or "nemo",
+                "accuracy": mmap.get("accuracy") or bench.get("overall_score"),
+                "allowed_f1": mmap.get("allowed_f1"),
+                "blocked_f1": mmap.get("blocked_f1"),
+                "mean_latency_ms": mmap.get("mean_latency_ms"),
+                "p95_latency_ms": mmap.get("p95_latency_ms"),
+            })
+    acc = _num(data.get("overall_accuracy"))
+    if acc is None and profiles:
+        nums = [_num(p.get("accuracy")) for p in profiles]
+        nums = [n / 100.0 if n is not None and n > 1 else n for n in nums]
+        nums = [n for n in nums if n is not None]
+        acc = min(nums) if nums else None
+    if acc is not None and acc > 1:
+        acc = acc / 100.0
+    passed = data.get("passed")
+    if passed is None and acc is not None:
+        threshold = _num(data.get("min_accuracy")) or 0.80
+        passed = acc >= threshold
+    model = extract_model(key, data)
+    job_id = data.get("evalhub_job_id") or data.get("id")
+    table = []
+    for profile in profiles:
+        pacc = _num(profile.get("accuracy"))
+        if pacc is not None and pacc > 1:
+            pacc = pacc / 100.0
+        table.append({
+            "task": profile.get("id") or "nemo",
+            "metric": "accuracy",
+            "value": "{:.1%}".format(pacc) if pacc is not None else "n/a",
+            "stderr": "—",
+            "rating": "good" if (pacc or 0) >= 0.8 else "moderate" if (pacc or 0) >= 0.5 else "poor",
+        })
+    smoke = data.get("smoke") if isinstance(data.get("smoke"), list) else []
+    probes = []
+    for item in smoke:
+        if not isinstance(item, dict):
+            continue
+        probes.append({
+            "name": item.get("prompt") or "",
+            "profile": item.get("expected") or "",
+            "rate": 0.0 if item.get("ok") else 1.0,
+            "fails": 0 if item.get("ok") else 1,
+            "total": 1,
+        })
+    return {
+        "fileType": "guardrail",
+        "title": "NeMo Guardrails evaluation",
+        "model": model,
+        "passed": passed,
+        "meta": list(filter(None, [
+            _meta("Model", model),
+            _meta("NeMo config", data.get("nemo_config")),
+            _meta("EvalHub job", job_id),
+            _meta("Benchmarks", ", ".join(str(b) for b in (data.get("benchmarks") or [])) or None),
+            _meta("Min accuracy", data.get("min_accuracy")),
+            _meta("Timestamp", data.get("timestamp") or extract_timestamp(key)),
+            _meta("Message", data.get("message")),
+        ])),
+        "metrics": list(filter(None, [
+            _metric("Accuracy", (acc or 0) * 100 if acc is not None and acc <= 1 else acc, "%", False) if acc is not None else None,
+            _metric("Min required", (_num(data.get("min_accuracy")) or 0.8) * 100, "%", False),
+        ])),
+        "strategies": [],
+        "profiles": profiles,
+        "probes": probes,
+        "table": table,
+        "text": text,
+    }
+
+
 def normalize_lm_eval(data, key):
     rows = []
     results = data.get("results") if isinstance(data.get("results"), dict) else {}
@@ -671,7 +757,9 @@ def normalize_payload(key, bucket, content):
         provider = provider_from_job(data)
         if provider == "garak" or "attack_success_rate" in data or "total_attack_successes" in data:
             kind = "garak"
-        elif provider == "guidellm" or "benchmarks" in data or "mean_ttft_ms" in data or "output_tokens_per_second" in data:
+        elif provider == "nemo-guardrails" or "overall_accuracy" in data or "nemo_config" in data:
+            kind = "guardrail"
+        elif provider == "guidellm" or "mean_ttft_ms" in data or "output_tokens_per_second" in data:
             kind = "guidellm"
         elif "results" in data and "config" in data:
             kind = "lm-eval"
@@ -679,6 +767,9 @@ def normalize_payload(key, bucket, content):
     if kind == "garak" and isinstance(data, dict):
         text = stripped if key.lower().endswith(".txt") else ""
         return normalize_garak(data, key, text=text)
+    if kind == "guardrail" and isinstance(data, dict):
+        text = stripped if key.lower().endswith(".txt") else ""
+        return normalize_guardrail(data, key, text=text)
     if kind == "lm-eval" and isinstance(data, dict):
         return normalize_lm_eval(data, key)
     if kind == "guidellm" and isinstance(data, dict):
@@ -700,7 +791,7 @@ def normalize_payload(key, bucket, content):
         }
     raise ValueError(
         "Unrecognized result file. Expected a GuideLLM summary, EvalHub job JSON, "
-        "Garak scan summary, or lm-eval results."
+        "Garak scan summary, NeMo Guardrails summary, or lm-eval results."
     )
 
 
@@ -849,6 +940,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             font-weight: 600;
         }
         .badge-garak { background: #fdf2f8; color: #be185d; }
+        .badge-guardrail { background: #ecfeff; color: #0e7490; }
         .badge-guidellm { background: var(--primary-light); color: var(--primary); }
         .badge-lm-eval { background: #f5f3ff; color: #6d28d9; }
         .badge-text, .badge-other { background: #f1f5f9; color: #475569; }
@@ -903,7 +995,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <body>
     <header>
         <h1>ModelOps Results Viewer</h1>
-        <p>Garak security scans and GuideLLM benchmarks uploaded by the onboarding pipeline.</p>
+        <p>Garak security scans, NeMo Guardrails evaluations, and GuideLLM benchmarks uploaded by the onboarding pipeline.</p>
     </header>
     <main>
         <p id="error" class="error"></p>
@@ -922,6 +1014,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             const k = item.key || '';
             return k.endsWith('-results.yaml')
                 || k.endsWith('scan_results.summary.json')
+                || k.endsWith('guardrail_eval.summary.json')
                 || k.includes('lm-eval');
         }
 
@@ -934,7 +1027,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         }
 
         function badgeForType(type) {
-            const labels = {garak: 'Garak', guidellm: 'GuideLLM', 'lm-eval': 'lm-eval', text: 'Log', other: 'File'};
+            const labels = {garak: 'Garak', guidellm: 'GuideLLM', guardrail: 'Guardrails', 'lm-eval': 'lm-eval', text: 'Log', other: 'File'};
             return `<span class="badge badge-${esc(type)}">${esc(labels[type] || type)}</span>`;
         }
 
@@ -965,6 +1058,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             const filters = [
                 ['all', 'All'],
                 ['garak', 'Garak'],
+                ['guardrail', 'Guardrails'],
                 ['guidellm', 'Benchmark'],
                 ['lm-eval', 'lm-eval'],
                 ['raw', 'Raw files'],

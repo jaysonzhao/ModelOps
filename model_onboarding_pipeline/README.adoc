@@ -17,8 +17,9 @@ The pipeline:
 * *Securely ingests* a candidate model from a trusted OCI "modelcar" catalog (Quay) and
   scans both its provenance/compliance metadata and the serving image for vulnerabilities
   (Trivy) *before* it is ever deployed.
-* *Red-teams the live model* with garak via EvalHub to catch unsafe behavior, in an
-  isolated sandbox namespace.
+* *Scores prompt injection* with the same labeled allow/block test twice: once
+  through passthrough NeMo rails (baseline) and once through DeBERTa input
+  rails, via `POST /v1/guardrail/checks` on a live NemoGuardrails Service.
 * *Advises on GPU placement*, automatically recommending (and applying) NVIDIA GPU
   time-slicing so a new model can safely co-reside on a GPU that is already in use.
 * *Requires human approval* before promoting the model into a "staging" (models-as-a-service)
@@ -54,14 +55,17 @@ if any gate fails, the pipeline halts and downstream stages never run.
 . *Apply GPU Sharing (sandbox)* — Applies the time-slicing plan when the GPU is already
   occupied. No-op when a dedicated GPU is free.
 . *Deploy Model* — Deploys the model (KServe/vLLM) so it can be scanned live.
-. *Security Scan (garak)* [GATE 2] — Runs a live garak red-team scan against the endpoint
-  via EvalHub and updates the registry entry with the results. Halts on findings above the
-  configured tolerance.
+. *Security Scan (prompt_injection, passthrough)* [GATE 2] — Same labeled
+  jailbreak vs benign set as the with-guardrail step, against empty input
+  rails. Records the ~50% always-allow baseline (min-accuracy 0).
+. *Security Scan (prompt_injection, DeBERTa)* [GATE 3] — Identical prompts
+  through `protectai/deberta-v3-base-prompt-injection-v2`. Halts if accuracy
+  is below 0.80.
 . *Teardown* — Removes the sandbox deployment to free the GPU for staging.
 
 === Phase 2 — Promote to staging (namespace: `vllm-staging`, human-gated)
 
-[start=7]
+[start=8]
 . *GPU Advisor (staging)* — Independently assesses the staging environment's GPU.
 . *Wait for Approval* — Publishes the deployment plan to the Model Intake UI and blocks
   until a human approves or rejects it.

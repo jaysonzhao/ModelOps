@@ -129,12 +129,12 @@ def _meta(label, value):
 
 def classify_key(key, bucket=""):
     name = (key or "").lower()
-    if "security_scan" in name or name.endswith("scan_results.summary.json") or "garak" in name:
-        return "garak"
     if "guardrail_eval" in name or name.endswith("guardrail_eval.summary.json") or "nemo-guardrails" in name:
         return "guardrail"
     if bucket == S3_SECURITY_BUCKET and "guardrail" in name:
         return "guardrail"
+    if "security_scan" in name or name.endswith("scan_results.summary.json") or "garak" in name:
+        return "garak"
     if bucket == S3_SECURITY_BUCKET:
         return "garak"
     if "lm-eval" in name:
@@ -216,6 +216,16 @@ def metrics_from_legacy_benchmark(benchmark):
 
 
 def provider_from_job(data):
+    if not isinstance(data, dict):
+        return ""
+    top = str(data.get("provider_id") or data.get("fileType") or "")
+    if top:
+        if "nemo" in top or "guardrail" in top:
+            return "nemo-guardrails"
+        if "garak" in top:
+            return "garak"
+        if "guidellm" in top:
+            return "guidellm"
     benches = []
     results = data.get("results") if isinstance(data.get("results"), dict) else {}
     benches.extend(results.get("benchmarks") or [])
@@ -225,12 +235,12 @@ def provider_from_job(data):
     for bench in benches:
         if isinstance(bench, dict) and bench.get("provider_id"):
             return str(bench.get("provider_id"))
-    name = str(data.get("name") or "")
+    name = str(data.get("name") or data.get("scan_label") or "")
     if "garak" in name:
         return "garak"
     if "guidellm" in name:
         return "guidellm"
-    if "guardrail" in name or "nemo-guardrails" in name:
+    if "guardrail" in name or "nemo-guardrails" in name or "prompt_injection" in name:
         return "nemo-guardrails"
     return ""
 
@@ -352,6 +362,16 @@ def _eval_rows(bench):
 
 
 def _profile_from_evalhub_bench(bench):
+    if not isinstance(bench, dict):
+        bench_id = str(bench or "garak")
+        return {
+            "id": bench_id,
+            "attack_success_rate": 0.0,
+            "total_evaluated": 0,
+            "total_attack_successes": 0,
+            "passed": None,
+            "probes": [],
+        }
     profile_id = str(bench.get("id") or bench.get("benchmark_id") or "garak")
     metrics = bench.get("metrics") if isinstance(bench.get("metrics"), dict) else {}
     overall = bench.get("evaluation_metadata") if isinstance(bench.get("evaluation_metadata"), dict) else {}
@@ -456,8 +476,8 @@ def normalize_guidellm(data, key):
     if isinstance(data.get("benchmarks"), list) and data["benchmarks"]:
         first = data["benchmarks"][0] if isinstance(data["benchmarks"][0], dict) else {}
         if isinstance(first.get("metrics"), dict) and any(
-            isinstance((first["metrics"].get(k) or {}).get("total"), dict)
-            for k in first["metrics"]
+            isinstance(block, dict) and isinstance(block.get("total"), dict)
+            for block in first["metrics"].values()
         ):
             for index, bench in enumerate(data["benchmarks"]):
                 if not isinstance(bench, dict):
@@ -487,7 +507,11 @@ def normalize_guidellm(data, key):
     passed = job_passed(data, metrics_map)
     meta = list(filter(None, [
         _meta("Model", model),
-        _meta("Profile", data.get("profile") or ((data.get("benchmarks") or [{}])[0] or {}).get("id")),
+        _meta("Profile", data.get("profile") or (
+            (data.get("benchmarks") or [{}])[0].get("id")
+            if isinstance((data.get("benchmarks") or [{}])[0], dict)
+            else (data.get("benchmarks") or [None])[0]
+        )),
         _meta("Rate", data.get("rate")),
         _meta("Max seconds", data.get("max_seconds")),
         _meta("Max requests", data.get("max_requests")),
@@ -526,6 +550,8 @@ def normalize_garak(data, key, text=""):
     probes = []
     seen_probes = set()
     for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
         for probe in profile.get("probes") or []:
             marker = (probe.get("profile"), probe.get("name"))
             if marker in seen_probes:
@@ -569,10 +595,16 @@ def normalize_garak(data, key, text=""):
     elif status_message:
         message = str(status_message)
     profile_names = data.get("profiles")
-    if isinstance(profile_names, list):
-        profile_label = ", ".join(str(item) for item in profile_names)
+    if isinstance(profile_names, list) and profile_names:
+        labels = []
+        for item in profile_names:
+            if isinstance(item, dict):
+                labels.append(str(item.get("id") or item.get("name") or ""))
+            else:
+                labels.append(str(item))
+        profile_label = ", ".join(x for x in labels if x)
     else:
-        profile_label = ", ".join(p.get("id") for p in profiles if p.get("id"))
+        profile_label = ", ".join(p.get("id") for p in profiles if isinstance(p, dict) and p.get("id"))
     meta = list(filter(None, [
         _meta("Model", model),
         _meta("Target", data.get("target") or ((data.get("model") or {}) if isinstance(data.get("model"), dict) else {}).get("url")),
@@ -606,7 +638,7 @@ def normalize_garak(data, key, text=""):
 
 def normalize_guardrail(data, key, text=""):
     results = data.get("results") if isinstance(data.get("results"), dict) else {}
-    profiles = data.get("profiles") if isinstance(data.get("profiles"), list) else []
+    profiles = [p for p in (data.get("profiles") or []) if isinstance(p, dict)] if isinstance(data.get("profiles"), list) else []
     if not profiles:
         for bench in results.get("benchmarks") or data.get("benchmarks") or []:
             if not isinstance(bench, dict):
@@ -629,9 +661,11 @@ def normalize_guardrail(data, key, text=""):
     if acc is not None and acc > 1:
         acc = acc / 100.0
     passed = data.get("passed")
+    min_acc = _num(data.get("min_accuracy"))
+    if min_acc is None:
+        min_acc = 0.80
     if passed is None and acc is not None:
-        threshold = _num(data.get("min_accuracy")) or 0.80
-        passed = acc >= threshold
+        passed = acc >= min_acc
     model = extract_model(key, data)
     job_id = data.get("evalhub_job_id") or data.get("id")
     table = []
@@ -658,9 +692,14 @@ def normalize_guardrail(data, key, text=""):
             "fails": 0 if item.get("ok") else 1,
             "total": 1,
         })
+    title = "NeMo Guardrails evaluation"
+    if str(data.get("scan_label") or "").startswith("without") or data.get("nemo_config") == "passthrough":
+        title = "Prompt injection (without rails)"
+    elif str(data.get("scan_label") or "").startswith("with") or data.get("nemo_config"):
+        title = "Prompt injection (with DeBERTa rails)"
     return {
         "fileType": "guardrail",
-        "title": "NeMo Guardrails evaluation",
+        "title": title,
         "model": model,
         "passed": passed,
         "meta": list(filter(None, [
@@ -674,7 +713,7 @@ def normalize_guardrail(data, key, text=""):
         ])),
         "metrics": list(filter(None, [
             _metric("Accuracy", (acc or 0) * 100 if acc is not None and acc <= 1 else acc, "%", False) if acc is not None else None,
-            _metric("Min required", (_num(data.get("min_accuracy")) or 0.8) * 100, "%", False),
+            _metric("Min required", (min_acc * 100 if min_acc <= 1 else min_acc), "%", False),
         ])),
         "strategies": [],
         "profiles": profiles,
@@ -755,10 +794,17 @@ def normalize_payload(key, bucket, content):
     kind = classify_key(key, bucket)
     if isinstance(data, dict):
         provider = provider_from_job(data)
-        if provider == "garak" or "attack_success_rate" in data or "total_attack_successes" in data:
-            kind = "garak"
-        elif provider == "nemo-guardrails" or "overall_accuracy" in data or "nemo_config" in data:
+        # Content wins over the filename. Unguarded prompt_injection reports
+        # are stored as *_security_scan/scan_results.summary.json.
+        if (
+            provider == "nemo-guardrails"
+            or data.get("fileType") in ("nemo-guardrails", "guardrail")
+            or "overall_accuracy" in data
+            or "nemo_config" in data
+        ):
             kind = "guardrail"
+        elif provider == "garak" or "attack_success_rate" in data or "total_attack_successes" in data:
+            kind = "garak"
         elif provider == "guidellm" or "mean_ttft_ms" in data or "output_tokens_per_second" in data:
             kind = "guidellm"
         elif "results" in data and "config" in data:

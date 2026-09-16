@@ -58,6 +58,7 @@ After a pipeline run completes (`security-scan` and `upload-guide-llm-results`):
 ## Gotchas
 
 - The previous quay.io image only understood legacy GuideLLM YAML (`benchmarks[].metrics.*.total`). The pipeline now writes a flat EvalHub summary; the in-repo image handles that format.
+- Prompt-injection summaries are stored as `*_security_scan/scan_results.summary.json` (without rails) and `*_guardrail_eval/guardrail_eval.summary.json` (with rails). The viewer must classify by `fileType` / `nemo_config` / `overall_accuracy`, not the `_security_scan` path — otherwise it treats string benchmark IDs as Garak objects and raises `'str' object has no attribute 'get'`.
 - Garak reports live in `security-scan-results`, not `benchmark-results`. The viewer secret must include `S3_SECURITY_BUCKET`.
 - The `quick` Garak profile is a single `dan.Dan_11_0` smoke probe and often stores no metrics. Rebuild after switching the pipeline to taxonomy profiles (`quality,avid_security,cwe`).
 - lm-eval upload is disabled by default. Re-enable those pipeline tasks to see lm-eval tables.

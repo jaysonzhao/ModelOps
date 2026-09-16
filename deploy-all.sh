@@ -14,6 +14,7 @@
 #   ./deploy-all.sh
 #   ./deploy-all.sh --skip-maas
 #   ./deploy-all.sh --skip-build --skip-maas
+#   ./deploy-all.sh --auto-approve   # skip the human gate (dev only)
 #   ./deploy-all.sh --help
 set -euo pipefail
 
@@ -27,6 +28,7 @@ GPU_OP_NS="${GPU_OP_NS:-nvidia-gpu-operator}"
 
 SKIP_MAAS=0
 SKIP_BUILD=0
+AUTO_APPROVE=0
 
 log()  { printf '\n==> %s\n' "$*"; }
 ok()   { printf '    %s\n' "$*"; }
@@ -142,10 +144,12 @@ phase_evalhub() {
   fi
 
   apply "$ROOT/model_onboarding_pipeline/evalhub/evalhub-provider-nemo-guardrails.yaml"
+  apply "$ROOT/model_onboarding_pipeline/evalhub/evalhub-provider-openshift-qa.yaml"
   apply "$ROOT/model_onboarding_pipeline/evalhub/evalhub-cr.yaml"
   oc wait -n "$RHOAI_NS" --for=condition=Ready evalhub.trustyai.opendatahub.io/evalhub --timeout=180s || \
     warn "EvalHub CR not Ready yet; continuing"
   ok "EvalHub is installed for GuideLLM. Prompt-injection gates hit live NemoGuardrails /v1/guardrail/checks (not the community EvalHub adapter image)."
+  ok "OpenShift Q&A BYOP provider registered (evalhub-provider-openshift-qa); pipeline Task openshift-qa-eval scores the live /v1 endpoint."
 }
 
 # ---------------------------------------------------------------------------
@@ -421,6 +425,7 @@ phase_pipeline() {
     deploy-model-task.yaml \
     security-scan-task.yaml \
     guardrail-eval-task.yaml \
+    openshift-qa-eval-task.yaml \
     teardown-model-task.yaml \
     grant-model-access-task.yaml \
     guidellm-benchmark-task.yaml \
@@ -432,27 +437,39 @@ phase_pipeline() {
     oc apply -n "$PIPELINE_NS" -f "$pipe/$task"
   done
 
-  # The sample Pipeline/PipelineRun YAML may still carry a previous cluster's
-  # EvalHub host. Point the live Pipeline defaults at this cluster's route.
-  local evalhub domain
+  # Point live Pipeline defaults at this cluster: EvalHub host, console
+  # domain, and the in-cluster intake Service so wait-for-approval does not
+  # auto-skip (empty approval-api-url prints "Skipping human approval gate").
+  local evalhub domain approval
   evalhub="$(oc get route evalhub -n "$RHOAI_NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
   domain="$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
-  if [[ -n "$evalhub" || -n "$domain" ]]; then
-    EVALHUB_HOST="$evalhub" CLUSTER_DOMAIN="$domain" \
-      oc get pipeline.tekton.dev model-intake-pipeline -n "$PIPELINE_NS" -o json | python3 -c '
+  approval="http://model-intake.${PIPELINE_NS}.svc.cluster.local:8080"
+  if [[ "$AUTO_APPROVE" -eq 1 ]]; then
+    approval=""
+    warn "AUTO_APPROVE: pipeline default approval-api-url left empty (skips human gate)"
+  fi
+  EVALHUB_HOST="$evalhub" CLUSTER_DOMAIN="$domain" APPROVAL_URL="$approval" \
+    oc get pipeline.tekton.dev model-intake-pipeline -n "$PIPELINE_NS" -o json | python3 -c '
 import json, os, sys
 pipe = json.load(sys.stdin)
 evalhub = os.environ.get("EVALHUB_HOST") or ""
 domain = os.environ.get("CLUSTER_DOMAIN") or ""
+approval = os.environ.get("APPROVAL_URL")
 for param in pipe.get("spec", {}).get("params", []):
     name = param.get("name")
     if evalhub and name == "evalhub-url":
         param["default"] = evalhub
     if domain and name == "openshift-console-domain":
         param["default"] = domain
+    if name == "approval-api-url":
+        param["default"] = approval if approval is not None else param.get("default", "")
 json.dump(pipe, sys.stdout)
-' | oc apply -n "$PIPELINE_NS" -f - >/dev/null
-    [[ -n "$evalhub" ]] && ok "EvalHub host: $evalhub"
+' | oc replace -n "$PIPELINE_NS" -f - >/dev/null
+  [[ -n "$evalhub" ]] && ok "EvalHub host: $evalhub"
+  if [[ -n "$approval" ]]; then
+    ok "Human approval: $approval"
+  else
+    ok "Human approval: skipped (empty approval-api-url)"
   fi
 
   ok "Tasks: $(oc get tasks.tekton.dev -n "$PIPELINE_NS" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
@@ -460,6 +477,7 @@ json.dump(pipe, sys.stdout)
   ok "Security gates: same prompt_injection allow/block test via /v1/guardrail/checks"
   ok "  security-scan            = passthrough rails, min-accuracy 0 (baseline)"
   ok "  security-scan-guardrail  = DeBERTa rails, min-accuracy 0.80"
+  ok "  openshift-qa-eval        = 5 static OpenShift Q&A, token F1 (edd-demo BYOP)"
   ok "Deploy + scan tasks retry 3 times (registry.access.redhat.com 502 / image pull flakes)"
 }
 
@@ -474,6 +492,9 @@ print_summary() {
   [[ -n "$results" ]] && ok "Results viewer  : https://$results"
   [[ -n "$s3"      ]] && ok "S3 browser      : https://$s3"
   [[ -n "$domain" && "$SKIP_MAAS" -eq 0 ]] && ok "MaaS API        : https://maas.${domain}/maas-api/health"
+  if [[ "$AUTO_APPROVE" -eq 0 ]]; then
+    ok "Approve runs at : https://${intake:-model-intake}/ (pipeline polls http://model-intake.${PIPELINE_NS}.svc.cluster.local:8080)"
+  fi
   ok "Submit a run from the Intake UI, or: oc create -n $PIPELINE_NS -f $ROOT/model_onboarding_pipeline/model-intake-pipeline/pipeline/model-intake-pipelinerun.yaml"
 }
 
@@ -483,6 +504,7 @@ main() {
     case "$1" in
       --skip-maas)  SKIP_MAAS=1 ;;
       --skip-build) SKIP_BUILD=1 ;;
+      --auto-approve) AUTO_APPROVE=1 ;;
       -h|--help)    usage ;;
       *)            die "unknown argument: $1 (try --help)" ;;
     esac

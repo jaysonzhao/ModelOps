@@ -10,6 +10,9 @@ Deploys a Flask web application that reads pipeline artifacts from MinIO and ren
 
 - A landing page listing Garak, NeMo Guardrails, and GuideLLM result files (no `?file=` required)
 - Garak security-scan summaries (`security-scan-results`)
+- NeMo Guardrails prompt_injection reports (`security-scan-results`)
+- OpenShift domain Q&A token-F1 reports (`benchmark-results`)
+- GuideLLM YAML summaries (`benchmark-results`)
 - NeMo Guardrails EvalHub summaries (`*_guardrail_eval/guardrail_eval.summary.json`)
 - GuideLLM benchmark summaries (`benchmark-results`)
 - lm-eval quality tables when those files are present

@@ -129,6 +129,8 @@ def _meta(label, value):
 
 def classify_key(key, bucket=""):
     name = (key or "").lower()
+    if "openshift_qa" in name or "openshift-qa" in name:
+        return "openshift-qa"
     if "guardrail_eval" in name or name.endswith("guardrail_eval.summary.json") or "nemo-guardrails" in name:
         return "guardrail"
     if bucket == S3_SECURITY_BUCKET and "guardrail" in name:
@@ -226,6 +228,8 @@ def provider_from_job(data):
             return "garak"
         if "guidellm" in top:
             return "guidellm"
+        if "openshift-qa" in top or "openshift_qa" in top:
+            return "openshift-qa-byop"
     benches = []
     results = data.get("results") if isinstance(data.get("results"), dict) else {}
     benches.extend(results.get("benchmarks") or [])
@@ -240,6 +244,8 @@ def provider_from_job(data):
         return "garak"
     if "guidellm" in name:
         return "guidellm"
+    if "openshift-qa" in name or "openshift_qa" in name:
+        return "openshift-qa-byop"
     if "guardrail" in name or "nemo-guardrails" in name or "prompt_injection" in name:
         return "nemo-guardrails"
     return ""
@@ -764,6 +770,66 @@ def normalize_lm_eval(data, key):
     }
 
 
+def normalize_openshift_qa(data, key):
+    items = data.get("items") if isinstance(data.get("items"), list) else []
+    mean_f1 = _num(data.get("mean_token_f1"))
+    mean_kw = _num(data.get("mean_keyword_hit"))
+    mean_combined = _num(data.get("mean_combined_score"))
+    min_score = _num(data.get("min_score"))
+    passed = data.get("passed")
+    if passed is None and mean_combined is not None and min_score is not None:
+        passed = mean_combined >= min_score
+    table = []
+    probes = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        f1 = _num(item.get("f1"))
+        combined = _num(item.get("combined_score"))
+        rating = "n/a"
+        if combined is not None:
+            rating = "good" if combined >= 0.6 else "moderate" if combined >= 0.3 else "poor"
+        qid = item.get("id") or "q"
+        table.append({
+            "task": "{} — {}".format(qid, item.get("question") or ""),
+            "metric": "token_f1 / keywords",
+            "value": "{:.3f} / {:.3f}".format(f1 or 0.0, _num(item.get("keyword_hit")) or 0.0),
+            "stderr": "combined {:.3f}".format(combined or 0.0),
+            "rating": rating,
+        })
+        probes.append({
+            "name": (item.get("answer") or item.get("error") or "")[:240],
+            "profile": item.get("gold") or "",
+            "rate": 1.0 - (combined or 0.0),
+            "fails": 0 if (combined or 0.0) >= 0.3 else 1,
+            "total": 1,
+        })
+    model = extract_model(key, data)
+    return {
+        "fileType": "openshift-qa",
+        "title": "OpenShift domain Q&A (token F1)",
+        "model": model,
+        "passed": passed,
+        "meta": list(filter(None, [
+            _meta("Model", model),
+            _meta("Served as", data.get("served_model")),
+            _meta("Provider", data.get("provider_id") or "openshift-qa-byop"),
+            _meta("Benchmark", data.get("benchmark_id") or "openshift-domain-f1"),
+            _meta("Min combined score", min_score),
+            _meta("Target", data.get("target")),
+        ])),
+        "metrics": list(filter(None, [
+            _metric("Mean token F1", mean_f1, "", False),
+            _metric("Mean keyword hit", mean_kw, "", False),
+            _metric("Mean combined score", mean_combined, "", False),
+        ])),
+        "strategies": [],
+        "probes": probes,
+        "table": table,
+        "text": "",
+    }
+
+
 def normalize_payload(key, bucket, content):
     stripped = (content or "").strip()
     if not stripped:
@@ -807,6 +873,13 @@ def normalize_payload(key, bucket, content):
             kind = "garak"
         elif provider == "guidellm" or "mean_ttft_ms" in data or "output_tokens_per_second" in data:
             kind = "guidellm"
+        elif (
+            provider in ("openshift-qa-byop", "openshift-qa")
+            or data.get("fileType") in ("openshift-qa", "openshift-qa-byop")
+            or "mean_token_f1" in data
+            or data.get("benchmark_id") == "openshift-domain-f1"
+        ):
+            kind = "openshift-qa"
         elif "results" in data and "config" in data:
             kind = "lm-eval"
 
@@ -818,6 +891,8 @@ def normalize_payload(key, bucket, content):
         return normalize_guardrail(data, key, text=text)
     if kind == "lm-eval" and isinstance(data, dict):
         return normalize_lm_eval(data, key)
+    if kind == "openshift-qa" and isinstance(data, dict):
+        return normalize_openshift_qa(data, key)
     if kind == "guidellm" and isinstance(data, dict):
         return normalize_guidellm(data, key)
     if isinstance(data, dict) and ("mean_ttft_ms" in data or "output_tokens_per_second" in data):
@@ -989,6 +1064,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         .badge-guardrail { background: #ecfeff; color: #0e7490; }
         .badge-guidellm { background: var(--primary-light); color: var(--primary); }
         .badge-lm-eval { background: #f5f3ff; color: #6d28d9; }
+        .badge-openshift-qa { background: #fef3c7; color: #b45309; }
         .badge-text, .badge-other { background: #f1f5f9; color: #475569; }
         .badge-success { background: var(--success-light); color: var(--success); }
         .badge-danger { background: var(--danger-light); color: var(--danger); }
@@ -1041,7 +1117,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <body>
     <header>
         <h1>ModelOps Results Viewer</h1>
-        <p>Garak security scans, NeMo Guardrails evaluations, and GuideLLM benchmarks uploaded by the onboarding pipeline.</p>
+        <p>Garak security scans, NeMo Guardrails evaluations, OpenShift domain Q&A, and GuideLLM benchmarks uploaded by the onboarding pipeline.</p>
     </header>
     <main>
         <p id="error" class="error"></p>
@@ -1061,6 +1137,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             return k.endsWith('-results.yaml')
                 || k.endsWith('scan_results.summary.json')
                 || k.endsWith('guardrail_eval.summary.json')
+                || k.endsWith('openshift_qa.summary.json')
                 || k.includes('lm-eval');
         }
 
@@ -1073,7 +1150,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         }
 
         function badgeForType(type) {
-            const labels = {garak: 'Garak', guidellm: 'GuideLLM', guardrail: 'Guardrails', 'lm-eval': 'lm-eval', text: 'Log', other: 'File'};
+            const labels = {garak: 'Garak', guidellm: 'GuideLLM', guardrail: 'Guardrails', 'lm-eval': 'lm-eval', 'openshift-qa': 'OpenShift Q&A', text: 'Log', other: 'File'};
             return `<span class="badge badge-${esc(type)}">${esc(labels[type] || type)}</span>`;
         }
 
@@ -1105,6 +1182,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 ['all', 'All'],
                 ['garak', 'Garak'],
                 ['guardrail', 'Guardrails'],
+                ['openshift-qa', 'OpenShift Q&A'],
                 ['guidellm', 'Benchmark'],
                 ['lm-eval', 'lm-eval'],
                 ['raw', 'Raw files'],
@@ -1186,8 +1264,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                     ${payload.text ? `<pre>${esc(payload.text)}</pre>` : ''}
                 </div>
                 ${profiles ? `<div class="card"><h3>Profiles</h3><table><thead><tr><th>Profile</th><th>Attack success rate</th><th>Attacks</th><th>Gate</th></tr></thead><tbody>${profiles}</tbody></table></div>` : ''}
-                ${probes ? `<div class="card"><h3>Probes</h3><table><thead><tr><th>Profile</th><th>Probe</th><th>Attacks</th><th>Success rate</th></tr></thead><tbody>${probes}</tbody></table></div>` : ''}
-                ${table ? `<div class="card"><h3>Tasks</h3><table><thead><tr><th>Task</th><th>Metric</th><th>Value</th><th>Rating</th><th>StdErr</th></tr></thead><tbody>${table}</tbody></table></div>` : ''}
+                ${probes ? `<div class="card"><h3>${payload.fileType === 'openshift-qa' ? 'Gold vs model answer' : 'Probes'}</h3><table><thead><tr><th>${payload.fileType === 'openshift-qa' ? 'Gold' : 'Profile'}</th><th>${payload.fileType === 'openshift-qa' ? 'Answer' : 'Probe'}</th><th>Attacks</th><th>Success rate</th></tr></thead><tbody>${probes}</tbody></table></div>` : ''}
+                ${table ? `<div class="card"><h3>${payload.fileType === 'openshift-qa' ? 'Questions' : 'Tasks'}</h3><table><thead><tr><th>${payload.fileType === 'openshift-qa' ? 'Question' : 'Task'}</th><th>Metric</th><th>Value</th><th>Rating</th><th>StdErr</th></tr></thead><tbody>${table}</tbody></table></div>` : ''}
                 ${strategies}
             `;
         }

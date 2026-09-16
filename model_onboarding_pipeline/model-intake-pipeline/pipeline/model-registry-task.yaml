@@ -147,6 +147,7 @@ spec:
         guidellm_job_id = read("evalhub-guidellm-job-id.txt")
         guardrail_job_id = read("evalhub-guardrail-job-id.txt")
         guardrail_ts = read("guardrail-timestamp.txt")
+        openshift_qa_ts = read("openshift-qa-timestamp.txt")
         garak_guardrail_ts = read("garak-guardrail-timestamp.txt")
         console_domain = os.environ.get("OPENSHIFT_CONSOLE_DOMAIN", "").strip().rstrip("/")
         tenant_ns = os.environ.get("TENANT_NS", "").strip()
@@ -202,6 +203,13 @@ spec:
         if guardrail_job_id and console_domain and tenant_ns:
             props["evalhub-guardrail-results"] = "https://{}/evaluation/{}/results/{}".format(
                 console_domain, tenant_ns, guardrail_job_id)
+        if openshift_qa_ts:
+            qa_file = "{}_openshift_qa/openshift_qa.summary.json".format(openshift_qa_ts)
+            if bench_ui:
+                props["openshift-qa-results-ui"] = "https://{}/?file={}&bucket=benchmark-results".format(
+                    bench_ui, qa_file)
+            if s3_ui:
+                props["openshift-qa-results-s3"] = "{}/download/benchmark-results/{}".format(s3_ui, qa_file)
 
         with open("/tmp/mr_props.json", "w") as f:
             json.dump(props, f)

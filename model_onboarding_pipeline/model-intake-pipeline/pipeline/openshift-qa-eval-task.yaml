@@ -1,0 +1,512 @@
+# FILE: openshift-qa-eval-task.yaml
+# EvalHub BYOP-style OpenShift domain Q&A (edd-demo token F1).
+# Chats the live sandbox vLLM /v1 endpoint with five static items.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: openshift-qa-eval
+spec:
+  description: |
+    Custom EvalHub BYOP evaluation modeled on lftsang/edd-demo
+    (hr-domain-f1 token F1). Asks the live model five static questions
+    about Red Hat OpenShift and gates on mean combined_score
+    (0.5 * token F1 + 0.5 * keyword hit).
+  params:
+    - name: target
+      type: string
+      description: "OpenAI-compatible base URL ending in /v1."
+    - name: model-name
+      type: string
+    - name: model-version
+      type: string
+      default: "v1"
+    - name: min-score
+      type: string
+      default: "0.30"
+      description: |
+        Minimum mean combined_score. edd-demo domain_f1 uses 0.80;
+        the pipeline default is lower so small instruct models can pass
+        when they still mention the required OpenShift terms.
+    - name: s3-api-endpoint
+      type: string
+      default: "http://minio-service.s3-storage.svc.cluster.local:9000"
+    - name: s3-access-key-id
+      type: string
+      default: "minio"
+    - name: s3-secret-access-key
+      type: string
+      default: "minio123"
+    - name: s3-bucket
+      type: string
+      default: "benchmark-results"
+    - name: s3-ui-route
+      type: string
+      default: ""
+    - name: mr-server
+      type: string
+      default: "http://modelops-registry.rhoai-model-registries.svc.cluster.local"
+    - name: mr-port
+      type: string
+      default: "8080"
+    - name: model-reg-author
+      type: string
+      default: "ModelOps Platform Team"
+  results:
+    - name: mean-f1
+      description: "Mean token F1 across the five OpenShift questions."
+    - name: passed
+      description: "true if mean combined_score meets min-score."
+  workspaces:
+    - name: shared-workspace
+      description: Shared workspace for eval artifacts
+  steps:
+    - name: score-openshift-qa
+      image: registry.access.redhat.com/ubi9/python-311
+      imagePullPolicy: IfNotPresent
+      workingDir: $(workspaces.shared-workspace.path)
+      env:
+        - name: TARGET_URL
+          value: $(params.target)
+        - name: MODEL_NAME
+          value: $(params.model-name)
+        - name: MODEL_VERSION
+          value: $(params.model-version)
+        - name: MIN_SCORE
+          value: $(params.min-score)
+        - name: S3_ENDPOINT_URL
+          value: $(params.s3-api-endpoint)
+        - name: S3_ACCESS_KEY_ID
+          value: $(params.s3-access-key-id)
+        - name: S3_SECRET_ACCESS_KEY
+          value: $(params.s3-secret-access-key)
+        - name: S3_BUCKET
+          value: $(params.s3-bucket)
+        - name: S3_UI_ROUTE
+          value: $(params.s3-ui-route)
+        - name: WORKSPACE_PATH
+          value: $(workspaces.shared-workspace.path)
+        - name: MR_SERVER
+          value: $(params.mr-server)
+        - name: MR_PORT
+          value: $(params.mr-port)
+        - name: MR_AUTHOR
+          value: $(params.model-reg-author)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        echo "--- OpenShift domain Q&A (EvalHub BYOP / edd-demo token F1) ---"
+        echo "target: ${TARGET_URL}"
+        echo "min combined_score: ${MIN_SCORE:-0.30}"
+        umask 000
+        chmod -R a+rwX "${WORKSPACE_PATH}" 2>/dev/null || true
+        echo "false" > "${WORKSPACE_PATH}/openshift-qa-passed.txt" || true
+        export PIP_DISABLE_PIP_VERSION_CHECK=1
+        pip install -q requests boto3 2>&1 | grep -v "already satisfied" || true
+
+        python3 - << 'PYEOF'
+        import json, os, re, time, warnings
+        warnings.filterwarnings("ignore")
+        import requests as req
+
+        def write_text(path, content):
+            try:
+                if os.path.exists(path):
+                    os.chmod(path, 0o666)
+            except Exception:
+                pass
+            try:
+                with open(path, "w") as f:
+                    f.write(content)
+                try:
+                    os.chmod(path, 0o666)
+                except Exception:
+                    pass
+                return path
+            except PermissionError:
+                alt = path + ".new"
+                with open(alt, "w") as f:
+                    f.write(content)
+                print("WARN: could not overwrite {}; wrote {}".format(path, alt))
+                return alt
+
+        def tokenize(text):
+            return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+        def token_f1(pred, gold):
+            # Same bag-of-tokens F1 as edd-demo domain_f1 / hr-rag adapter.
+            p, g = tokenize(pred), tokenize(gold)
+            if not p and not g:
+                return 1.0
+            if not p or not g:
+                return 0.0
+            from collections import Counter
+            pc, gc = Counter(p), Counter(g)
+            overlap = sum((pc & gc).values())
+            prec = overlap / max(sum(pc.values()), 1)
+            rec = overlap / max(sum(gc.values()), 1)
+            if prec + rec == 0:
+                return 0.0
+            return 2.0 * prec * rec / (prec + rec)
+
+        def keyword_hit(pred, must):
+            text = (pred or "").lower()
+            if not must:
+                return 1.0
+            hits = sum(1 for w in must if w.lower() in text)
+            return hits / float(len(must))
+
+        def extract_answer(payload):
+            if not isinstance(payload, dict):
+                return ""
+            choices = payload.get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                msg = choices[0].get("message") or {}
+                if isinstance(msg, dict) and msg.get("content"):
+                    return str(msg.get("content")).strip()
+                if choices[0].get("text"):
+                    return str(choices[0].get("text")).strip()
+            return ""
+
+        ws = os.environ["WORKSPACE_PATH"]
+        target = os.environ.get("TARGET_URL", "").rstrip("/")
+        model_name = os.environ.get("MODEL_NAME", "model")
+        min_score = float(os.environ.get("MIN_SCORE", "0.30") or "0.30")
+        items = [
+            {
+                "id": "q1-what-is-openshift",
+                "question": "What is Red Hat OpenShift?",
+                "gold": "Red Hat OpenShift is an enterprise Kubernetes platform for building and running containerized applications.",
+                "must_contain": ["kubernetes", "container"],
+            },
+            {
+                "id": "q2-project",
+                "question": "What is an OpenShift project?",
+                "gold": "An OpenShift project is a Kubernetes namespace with additional access controls.",
+                "must_contain": ["namespace"],
+            },
+            {
+                "id": "q3-oc-cli",
+                "question": "What is the oc command used for?",
+                "gold": "oc is the OpenShift command-line interface for creating and managing cluster resources.",
+                "must_contain": ["command"],
+            },
+            {
+                "id": "q4-route",
+                "question": "What is an OpenShift Route?",
+                "gold": "A Route exposes a Service outside the cluster using a DNS hostname.",
+                "must_contain": ["service"],
+            },
+            {
+                "id": "q5-buildconfig",
+                "question": "What is a BuildConfig in OpenShift?",
+                "gold": "A BuildConfig describes how OpenShift builds a container image from source code or a Dockerfile.",
+                "must_contain": ["image"],
+            },
+        ]
+
+        served = model_name
+        last_err = None
+        for i in range(1, 61):
+            try:
+                resp = req.get(target + "/models", timeout=15)
+                if resp.status_code < 400:
+                    body = resp.json()
+                    ids = []
+                    for m in (body.get("data") or []) if isinstance(body, dict) else []:
+                        if isinstance(m, dict) and m.get("id"):
+                            ids.append(str(m["id"]))
+                    if ids:
+                        if model_name not in ids:
+                            served = ids[0]
+                        print("models ready: {}".format(", ".join(ids[:5])))
+                    else:
+                        print("models endpoint ready (no ids)")
+                    last_err = None
+                    break
+                last_err = "HTTP {}".format(resp.status_code)
+            except Exception as e:
+                last_err = str(e)
+            print("  [{}/60] waiting for {}/models ({})".format(i, target, last_err))
+            time.sleep(10)
+        else:
+            print("ERROR: model /v1/models never became ready ({})".format(last_err))
+            raise SystemExit(1)
+
+        system = (
+            "You are answering questions about Red Hat OpenShift. "
+            "Reply in one or two short factual sentences."
+        )
+        rows = []
+        for item in items:
+            answer = ""
+            err = ""
+            try:
+                payload = {
+                    "model": served,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": item["question"]},
+                    ],
+                    "max_tokens": 128,
+                    "temperature": 0,
+                }
+                resp = req.post(target + "/chat/completions", json=payload, timeout=120)
+                if resp.status_code == 404:
+                    resp = req.post(
+                        target + "/completions",
+                        json={
+                            "model": served,
+                            "prompt": system + "\n\nQuestion: " + item["question"] + "\nAnswer:",
+                            "max_tokens": 128,
+                            "temperature": 0,
+                        },
+                        timeout=120,
+                    )
+                resp.raise_for_status()
+                answer = extract_answer(resp.json())
+            except Exception as e:
+                err = str(e)
+                print("WARN: {} failed: {}".format(item["id"], err))
+            f1 = token_f1(answer, item["gold"])
+            kw = keyword_hit(answer, item["must_contain"])
+            combined = 0.5 * f1 + 0.5 * kw
+            row = {
+                "id": item["id"],
+                "question": item["question"],
+                "gold": item["gold"],
+                "answer": answer,
+                "error": err,
+                "f1": round(f1, 4),
+                "keyword_hit": round(kw, 4),
+                "combined_score": round(combined, 4),
+                "must_contain": item["must_contain"],
+            }
+            rows.append(row)
+            print("  {} f1={:.3f} keywords={:.3f} combined={:.3f}".format(
+                item["id"], f1, kw, combined))
+            if answer:
+                print("    answer: {}".format(answer[:240].replace("\n", " ")))
+
+        mean_f1 = sum(r["f1"] for r in rows) / float(len(rows))
+        mean_kw = sum(r["keyword_hit"] for r in rows) / float(len(rows))
+        mean_combined = sum(r["combined_score"] for r in rows) / float(len(rows))
+        passed = mean_combined >= min_score
+        ts = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+        prefix = "{}_openshift_qa".format(ts)
+        summary = {
+            "provider_id": "openshift-qa-byop",
+            "fileType": "openshift-qa",
+            "benchmark_id": "openshift-domain-f1",
+            "collection_id": "openshift-qa-eval-v1",
+            "model": model_name,
+            "served_model": served,
+            "target": target,
+            "min_score": min_score,
+            "mean_token_f1": round(mean_f1, 4),
+            "mean_keyword_hit": round(mean_kw, 4),
+            "mean_combined_score": round(mean_combined, 4),
+            "passed": passed,
+            "items": rows,
+            "results": {
+                "benchmarks": [{
+                    "id": "openshift-domain-f1",
+                    "provider_id": "openshift-qa-byop",
+                    "metrics": {
+                        "f1": round(mean_f1, 4),
+                        "keyword_hit": round(mean_kw, 4),
+                        "combined_score": round(mean_combined, 4),
+                    },
+                    "overall_score": round(mean_combined, 4),
+                    "passed": passed,
+                }]
+            },
+        }
+        dump = json.dumps(summary, indent=2)
+        result_dir = os.path.join(ws, prefix)
+        os.makedirs(result_dir, exist_ok=True)
+        try:
+            os.chmod(result_dir, 0o777)
+        except Exception:
+            pass
+        write_text(os.path.join(result_dir, "openshift_qa.summary.json"), dump)
+        write_text(os.path.join(ws, "openshift_qa.summary.json"), dump)
+        write_text(os.path.join(ws, "openshift-qa-timestamp.txt"), ts)
+        write_text(os.path.join(ws, "openshift-qa-passed.txt"), "true" if passed else "false")
+        write_text(os.path.join(ws, "openshift-qa-mean-f1.txt"), "{:.4f}".format(mean_f1))
+
+        s3_ui = os.environ.get("S3_UI_ROUTE", "").rstrip("/")
+        bucket = os.environ.get("S3_BUCKET", "benchmark-results")
+        if s3_ui:
+            report = "{}/download/{}/{}/openshift_qa.summary.json".format(s3_ui, bucket, prefix)
+        else:
+            report = "s3://{}/{}/openshift_qa.summary.json".format(bucket, prefix)
+        try:
+            import boto3
+            from botocore.client import Config
+            client = boto3.client(
+                "s3",
+                endpoint_url=os.environ.get("S3_ENDPOINT_URL"),
+                aws_access_key_id=os.environ.get("S3_ACCESS_KEY_ID"),
+                aws_secret_access_key=os.environ.get("S3_SECRET_ACCESS_KEY"),
+                config=Config(signature_version="s3v4"),
+                region_name="us-east-1",
+            )
+            for fname in os.listdir(result_dir):
+                key = "{}/{}".format(prefix, fname)
+                client.upload_file(os.path.join(result_dir, fname), bucket, key)
+                print("uploaded s3://{}/{}".format(bucket, key))
+        except Exception as e:
+            print("WARN: S3 upload failed ({})".format(e))
+
+        status_word = "PASSED" if passed else "FAILED"
+        mr_props = {
+            "overall-status": (
+                "SCANNING (OpenShift Q&A PASSED, pending teardown)"
+                if passed else "FAILED - OpenShift domain Q&A"
+            ),
+            "openshift-qa-status": status_word,
+            "openshift-qa-f1": "{:.1%}".format(mean_f1),
+            "openshift-qa-keyword-hit": "{:.1%}".format(mean_kw),
+            "openshift-qa-combined": "{:.1%}".format(mean_combined),
+            "openshift-qa-report": report,
+        }
+        with open("/tmp/mr_props.json", "w") as f:
+            json.dump(mr_props, f)
+        print("--- OpenShift Q&A mean F1={:.3f} keywords={:.3f} combined={:.3f} passed={} ---".format(
+            mean_f1, mean_kw, mean_combined, passed))
+        PYEOF
+
+        export MR_STAGE="openshift-qa-eval"
+        export MODEL_URI=""
+        export MODEL_DESCRIPTION=""
+        export MR_PROPS_JSON="$(cat /tmp/mr_props.json 2>/dev/null || echo '{}')"
+        cat > /tmp/registry_helper.py << 'REGEOF'
+        #!/usr/bin/env python3
+        import json, os, ssl, time, urllib.error, urllib.parse, urllib.request
+        def log(msg):
+            print("[model-registry] {}".format(msg), flush=True)
+        def wrap_props(d):
+            return {str(k): {"metadataType": "MetadataStringValue", "string_value": str(v)} for k, v in d.items() if v is not None}
+        def unwrap_props(d):
+            out = {}
+            for k, v in (d or {}).items():
+                if isinstance(v, dict):
+                    out[k] = str(v.get("string_value") or v.get("int_value") or v.get("double_value") or v.get("bool_value") or "")
+                elif v is None:
+                    out[k] = ""
+                else:
+                    out[k] = str(v)
+            return out
+        class RestClient:
+            def __init__(self, server, port):
+                self.base = "{}:{}/api/model_registry/v1alpha3".format(server.rstrip("/"), int(port))
+                self.ctx = ssl._create_unverified_context() if self.base.startswith("https://") else None
+            def request(self, method, path, body=None, allow_404=False):
+                url = self.base + path
+                data = json.dumps(body).encode("utf-8") if body is not None else None
+                headers = {"Accept": "application/json"}
+                if data is not None:
+                    headers["Content-Type"] = "application/json"
+                req = urllib.request.Request(url, data=data, method=method, headers=headers)
+                try:
+                    with urllib.request.urlopen(req, timeout=30, context=self.ctx) as resp:
+                        raw = resp.read()
+                        return json.loads(raw.decode("utf-8")) if raw else {}
+                except urllib.error.HTTPError as e:
+                    err_body = e.read().decode("utf-8", "replace")
+                    if allow_404 and e.code == 404:
+                        return None
+                    raise RuntimeError("{} {} -> {} {}".format(method, url, e.code, err_body[:400])) from e
+            def find_model(self, name):
+                return self.request("GET", "/registered_model?{}".format(urllib.parse.urlencode({"name": name})), allow_404=True)
+            def find_version(self, model_id, version):
+                return self.request("GET", "/model_version?{}".format(urllib.parse.urlencode({"name": version, "parentResourceId": model_id})), allow_404=True)
+        def main():
+            server = os.environ["MR_SERVER"].rstrip("/")
+            port = os.environ.get("MR_PORT", "8080")
+            author = os.environ.get("MR_AUTHOR", "ModelOps Platform")
+            name = os.environ["MODEL_NAME"]
+            version = os.environ.get("MODEL_VERSION", "v1")
+            uri = os.environ.get("MODEL_URI", "") or "oci://unknown/{}:{}".format(name, version)
+            description = os.environ.get("MODEL_DESCRIPTION", "")
+            stage = os.environ.get("MR_STAGE", "")
+            try:
+                props = json.loads(os.environ.get("MR_PROPS_JSON", "{}") or "{}")
+            except Exception as e:
+                log("WARNING: MR_PROPS_JSON not valid JSON ({}); ignoring.".format(e))
+                props = {}
+            merged = {str(k): ("" if v is None else str(v)) for k, v in props.items()}
+            if stage:
+                merged["onboarding-stage"] = stage
+            merged["last-updated"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+            try:
+                client = RestClient(server, port)
+                client.request("GET", "/registered_models?pageSize=1")
+            except Exception as e:
+                log("WARNING: could not connect to model registry ({}). Skipping.".format(e))
+                return
+            try:
+                rm = client.find_model(name)
+            except Exception as e:
+                log("WARNING: lookup failed ({}). Skipping.".format(e))
+                return
+            if rm is None:
+                try:
+                    rm = client.request("POST", "/registered_models", {"name": name, "description": description or "Onboarding via ModelOps pipeline"})
+                except Exception as e:
+                    log("WARNING: could not register model ({}).".format(e))
+                    return
+            rm_id = (rm or {}).get("id")
+            if not rm_id:
+                log("WARNING: registered model has no id; skipping.")
+                return
+            try:
+                ver = client.find_version(rm_id, version)
+            except Exception as e:
+                log("WARNING: version lookup failed ({}). Skipping.".format(e))
+                return
+            if ver is None:
+                try:
+                    ver = client.request("POST", "/model_versions", {
+                        "name": version, "registeredModelId": rm_id, "author": author,
+                        "description": description or "Registered by ModelOps pipeline",
+                        "customProperties": wrap_props(merged),
+                    })
+                except Exception as e:
+                    log("WARNING: could not create version ({}).".format(e))
+                    return
+                try:
+                    client.request("POST", "/model_versions/{}/artifacts".format(ver["id"]), {
+                        "name": name, "uri": uri, "modelFormatName": "vLLM",
+                        "modelFormatVersion": "1", "artifactType": "model-artifact",
+                    })
+                except Exception as e:
+                    log("WARNING: artifact registration failed ({}).".format(e))
+                log("Registered '{}' version '{}'.".format(name, version))
+                return
+            current = unwrap_props(ver.get("customProperties"))
+            current.update(merged)
+            try:
+                client.request("PATCH", "/model_versions/{}".format(ver["id"]), {"customProperties": wrap_props(current)})
+                log("Updated version '{}' - merged {} properties.".format(version, len(merged)))
+            except Exception as e:
+                log("WARNING: could not update version ({}).".format(e))
+        if __name__ == "__main__":
+            try:
+                main()
+            except Exception as e:
+                log("WARNING: unexpected registry error ({}); continuing.".format(e))
+        REGEOF
+        python3 /tmp/registry_helper.py || echo "WARN: registry update errored (non-fatal)."
+
+        PASSED=$(cat "$WORKSPACE_PATH/openshift-qa-passed.txt" 2>/dev/null || echo "false")
+        MEAN=$(cat "$WORKSPACE_PATH/openshift-qa-mean-f1.txt" 2>/dev/null || echo "0")
+        echo -n "$MEAN" > "$(results.mean-f1.path)"
+        echo -n "$PASSED" > "$(results.passed.path)"
+        echo ""
+        echo "--- OpenShift Q&A gate: passed=$PASSED f1=$MEAN ---"
+        if [ "$PASSED" != "true" ]; then
+          echo "RESULT: FAILED - halting pipeline."
+          exit 1
+        fi
+        echo "RESULT: PASSED"

@@ -1,0 +1,115 @@
+# EvalHub BYOP provider for Red Hat OpenShift domain Q&A.
+# Shape matches https://github.com/lftsang/edd-demo (evalhub.yaml):
+# provider + collection + token-F1 capability gate.
+#
+# The community adapter image is not required. The onboarding pipeline
+# Task `openshift-qa-eval` chats the live vLLM /v1 endpoint with the
+# five static items below and scores token F1 the same way edd-demo
+# scores hr-domain-f1.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: evalhub-provider-openshift-qa
+  namespace: redhat-ods-applications
+  labels:
+    trustyai.opendatahub.io/evalhub-provider-type: system
+    trustyai.opendatahub.io/evalhub-provider-name: openshift-qa-byop
+data:
+  openshift-qa.yaml: |
+    id: openshift-qa-byop
+    name: OpenShift Domain Q&A
+    title: OpenShift Domain Q&A
+    description: >-
+      Custom evaluator for Red Hat OpenShift knowledge. Five static
+      question/answer items scored with token-level F1 against gold
+      answers (edd-demo domain_f1). Keyword hits are reported as a
+      secondary capability signal for small models.
+    type: custom
+    tags: [openshift, redhat, byop, capability, qa]
+    agent:
+      evaluates: [ capability, domain, openshift ]
+      recommended_when:
+        - "User wants to check Red Hat OpenShift domain knowledge"
+        - "Pre-promotion capability gate on a live chat endpoint"
+      target_type: model
+      summary: "Score a chat model on five static OpenShift Q&A items"
+      complements: [ guidellm, lm-evaluation-harness ]
+      hints:
+        - "Pipeline Task openshift-qa-eval chats the live sandbox /v1 endpoint"
+        - "pass_criteria.threshold 0.80 matches edd-demo hr-domain-f1; the pipeline gate defaults lower for small instruct models"
+      result_interpretation:
+        - "f1 is token overlap vs gold — higher is better"
+        - "keyword_hit is the fraction of required OpenShift terms present in the answer"
+        - "combined_score is 0.5 * f1 + 0.5 * keyword_hit"
+    runtime:
+      k8s:
+        image: registry.access.redhat.com/ubi9/python-311
+        image_pull_policy: IfNotPresent
+        entrypoint: [python3, -c, "print('use pipeline Task openshift-qa-eval')"]
+        cpu_request: 100m
+        memory_request: 256Mi
+        cpu_limit: "1"
+        memory_limit: 1Gi
+      local:
+        command: python3
+    benchmarks:
+      - id: openshift-domain-f1
+        name: OpenShift Domain F1
+        description: >-
+          Token-level F1 vs five gold answers about Red Hat OpenShift
+          (platform, project/namespace, oc CLI, Route, BuildConfig).
+        category: capability
+        metrics:
+          - f1
+          - keyword_hit
+          - combined_score
+        tags: [openshift, redhat, capability, qa, byop]
+        primary_score:
+          metric: f1
+          lower_is_better: false
+        pass_criteria:
+          threshold: 0.80
+    parameters:
+      - name: min_score
+        type: number
+        default: 0.30
+        description: >-
+          Pipeline gate on mean combined_score. EvalHub collection
+          pass_criteria stay at 0.80 to match edd-demo domain_f1.
+    collection:
+      id: openshift-qa-eval-v1
+      name: OpenShift Domain Evaluation v1
+      description: >-
+        Capability gate for Red Hat OpenShift knowledge. Define once,
+        reuse on every onboarding run.
+      tags: [openshift, redhat, byop, capability, v1]
+      benchmarks:
+        - provider_id: openshift-qa-byop
+          benchmark_id: openshift-domain-f1
+          weight: 1.0
+          pass_criteria:
+            threshold: 0.80
+      pass_criteria:
+        threshold: 0.80
+    items:
+      - id: q1-what-is-openshift
+        question: What is Red Hat OpenShift?
+        gold: Red Hat OpenShift is an enterprise Kubernetes platform for building and running containerized applications.
+        must_contain: [kubernetes, container]
+      - id: q2-project
+        question: What is an OpenShift project?
+        gold: An OpenShift project is a Kubernetes namespace with additional access controls.
+        must_contain: [namespace]
+      - id: q3-oc-cli
+        question: What is the oc command used for?
+        gold: oc is the OpenShift command-line interface for creating and managing cluster resources.
+        must_contain: [command]
+      - id: q4-route
+        question: What is an OpenShift Route?
+        gold: A Route exposes a Service outside the cluster using a DNS hostname.
+        must_contain: [service]
+      - id: q5-buildconfig
+        question: What is a BuildConfig in OpenShift?
+        gold: A BuildConfig describes how OpenShift builds a container image from source code or a Dockerfile.
+        must_contain: [image]

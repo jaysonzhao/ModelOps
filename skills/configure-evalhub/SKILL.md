@@ -36,6 +36,7 @@ oc wait -n redhat-ods-applications --for=condition=Ready pod -l app.kubernetes.i
 
 ```bash
 oc apply -f model_onboarding_pipeline/evalhub/evalhub-provider-nemo-guardrails.yaml
+oc apply -f model_onboarding_pipeline/evalhub/evalhub-provider-openshift-qa.yaml
 oc apply -f model_onboarding_pipeline/evalhub/evalhub-cr.yaml
 oc wait -n redhat-ods-applications --for=condition=Ready evalhub.trustyai.opendatahub.io/evalhub --timeout=120s
 ```
@@ -182,6 +183,7 @@ Expected: `state: completed` with `accuracy`, `allowed_f1` / `blocked_f1`, and l
 - **Probes not found in garak 0.15**: Old probe names like `availability`, `off_topic_safety_cases`, `leaky_completion` don't exist. Use: `apikey.GetKey,atkgen.Tox,dan.AutoDANCached,dan.DanInTheWild,encoding.InjectBase64,leakreplay.GuardianCloze`. Pass `--skip_unknown` to skip unknown ones.
 - **EvalHub uses namespace multi-tenancy**: The `X-Tenant` header controls the target namespace. Set it to the namespace where the InferenceService runs.
 - **NeMo Guardrails provider is community, not bundled**: Register `evalhub-provider-nemo-guardrails.yaml` only if you want dashboard jobs. The adapter image `quay.io/eval-hub/community-nemo-guardrails:latest` is typically unauthenticated / not pullable. The onboarding pipeline scores live `/v1/guardrail/checks` instead.
+- **OpenShift Q&A is a BYOP provider** (same shape as [lftsang/edd-demo](https://github.com/lftsang/edd-demo)): `evalhub-provider-openshift-qa.yaml` registers `openshift-qa-byop` with a token-F1 capability benchmark. The pipeline Task `openshift-qa-eval` chats the live sandbox `/v1` endpoint with five static Red Hat OpenShift questions rather than submitting an EvalHub adapter Job.
 - **Always-block rails look perfect on risk-only sets**: The article benchmarks mix allow and block labels so accuracy measures safety and utility. The without-guardrail scan uses min-accuracy 0 so a passthrough ~50% does not fail the gate.
 - **Lighteval smoke test**: Currently commented out in the original SKILL.md — Lighteval's litellm adapter only supports generative benchmarks; loglikelihood tasks raise `NotImplementedError`.
 

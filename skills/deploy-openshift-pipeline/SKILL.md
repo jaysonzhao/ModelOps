@@ -7,7 +7,7 @@ compatibility: Requires oc CLI, OpenShift cluster with Tekton Pipelines operator
 # Deploy OpenShift Pipeline
 
 Deploys the ModelOps LLM onboarding pipeline end-to-end:
-compliance/artifact scan → GPU advisor → GPU sharing → deploy → prompt_injection (passthrough) → prompt_injection (DeBERTa) → teardown → staging advisor → human approval → staging deploy → benchmark → registry update → (optional) MaaS production deploy.
+compliance/artifact scan → GPU advisor → GPU sharing → deploy → prompt_injection (passthrough) → prompt_injection (DeBERTa) → OpenShift Q&A → teardown → staging advisor → human approval → staging deploy → benchmark → registry update → (optional) MaaS production deploy.
 
 ## Prerequisites
 
@@ -112,6 +112,7 @@ oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/nem
 oc apply -f model_onboarding_pipeline/evalhub/nemo-guardrails-config.yaml
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/security-scan-task.yaml
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/guardrail-eval-task.yaml
+oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/openshift-qa-eval-task.yaml
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/teardown-model-task.yaml
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/grant-model-access-task.yaml
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/guidellm-benchmark-task.yaml
@@ -120,6 +121,8 @@ oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/mod
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/deploy-maas-task.yaml
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/model-intake-pipeline.yaml
 ```
+
+`./deploy-all.sh` then patches live Pipeline defaults: EvalHub host, console domain, and `approval-api-url=http://model-intake.vllm.svc.cluster.local:8080` so `wait-for-approval` does not auto-skip. Pass `--auto-approve` only for unattended dev runs.
 
 Verify:
 
@@ -156,7 +159,7 @@ Check all TaskRuns succeed in order:
 oc get taskrun -n vllm --sort-by=.metadata.creationTimestamp
 ```
 
-Expected order: `compliance-artifact-scan`, `gpu-advisor-sandbox`, `apply-gpu-sharing-sandbox`, `deploy-model`, `security-scan` (prompt_injection without rails / passthrough), `security-scan-guardrail` (same prompt_injection test with DeBERTa rails), `teardown-model`, `gpu-advisor-staging`, `wait-for-approval`, `apply-gpu-sharing-staging`, `deploy-model-staging`, `benchmark`, `upload-guide-llm-results`, `register-model-and-results`, `deploy-maas` (if enabled).
+Expected order: `compliance-artifact-scan`, `gpu-advisor-sandbox`, `apply-gpu-sharing-sandbox`, `deploy-model`, `security-scan` (prompt_injection without rails / passthrough), `security-scan-guardrail` (same prompt_injection test with DeBERTa rails), `openshift-qa-eval` (five static Red Hat OpenShift Q&A, token F1), `teardown-model`, `gpu-advisor-staging`, `wait-for-approval`, `apply-gpu-sharing-staging`, `deploy-model-staging`, `benchmark`, `upload-guide-llm-results`, `register-model-and-results`, `deploy-maas` (if enabled).
 
 Inspect model registry:
 

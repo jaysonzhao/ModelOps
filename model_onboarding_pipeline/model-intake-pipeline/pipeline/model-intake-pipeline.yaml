@@ -23,14 +23,17 @@ spec:
       6. security-scan-guardrail (prompt_injection WITH DeBERTa rails) :
          identical labeled jailbreak vs benign set (jackhhao plus article
          examples) via POST /v1/guardrail/checks. Gate on accuracy (>= 0.80).
+      6b. openshift-qa-eval : EvalHub BYOP (edd-demo token F1) — five static
+         Red Hat OpenShift Q&A items against the live sandbox /v1 chat
+         endpoint. Gate on mean combined_score (default 0.30).
 
     Because tasks are chained with runAfter, a failure in the compliance
-    scan OR either prompt_injection gate halts the pipeline - so the
-    staging phase is reached ONLY when all three gates pass.
+    scan, either prompt_injection gate, or OpenShift domain Q&A halts the
+    pipeline - so the staging phase is reached ONLY when all four gates pass.
 
     PHASE 2 - Promote to staging (namespace: staging-namespace, e.g.
     vllm-staging):
-      7. teardown-model : free the sandbox GPU.
+      7. teardown-model : free the sandbox GPU (after OpenShift Q&A).
       8. gpu-advisor-staging : GPU capacity plan for staging.
       9. wait-for-approval : human approval gate.
       10. apply-gpu-sharing-staging : enable staging time-slicing if needed.
@@ -205,10 +208,9 @@ spec:
       name: advisor-timeout-seconds
       type: string
     # Gate 2 (phase 2) - Human approval
-    - default: ""
+    - default: "http://model-intake.vllm.svc.cluster.local:8080"
       description: >-
-        Base URL of the model-intake app, e.g.
-        http://model-intake.vllm.svc.cluster.local:8080. Empty = auto-approve.
+        Base URL of the model-intake app. Empty = auto-approve (skips human review).
       name: approval-api-url
       type: string
     - default: "15"
@@ -293,6 +295,14 @@ spec:
     - default: "1800"
       description: Seconds to wait for the prompt_injection scoring step (default 30m).
       name: guardrail-poll-timeout-seconds
+      type: string
+    - default: "0.30"
+      description: |
+        Minimum mean combined_score for openshift-qa-eval (0.5 token F1 +
+        0.5 keyword hit on five static Red Hat OpenShift Q&A items).
+        edd-demo domain_f1 uses 0.80; the default is lower for small
+        instruct models.
+      name: openshift-qa-min-score
       type: string
     - default: "evalhub-redhat-ods-applications.apps.cluster-fz7vw.fz7vw.sandbox5177.opentlc.com"
       description: EvalHub base URL (host only, no protocol prefix)
@@ -653,6 +663,44 @@ spec:
         - name: shared-workspace
           workspace: shared-workspace
 
+    # --- GATE 4: OpenShift domain Q&A (EvalHub BYOP / edd-demo token F1) ---
+    - name: openshift-qa-eval
+      params:
+        - name: target
+          value: "http://$(params.model-name)-predictor.$(params.target-namespace).svc.cluster.local:8080/v1"
+        - name: model-name
+          value: $(params.model-name)
+        - name: model-version
+          value: $(params.model-version)
+        - name: min-score
+          value: $(params.openshift-qa-min-score)
+        - name: s3-api-endpoint
+          value: $(params.scan-s3-endpoint)
+        - name: s3-access-key-id
+          value: $(params.scan-s3-access-key-id)
+        - name: s3-secret-access-key
+          value: $(params.scan-s3-secret-access-key)
+        - name: s3-bucket
+          value: "benchmark-results"
+        - name: s3-ui-route
+          value: $(params.s3-ui-route)
+        - name: mr-server
+          value: $(params.mr-server)
+        - name: mr-port
+          value: $(params.mr-port)
+        - name: model-reg-author
+          value: $(params.model-reg-author)
+      timeout: "20m0s"
+      runAfter:
+        - security-scan-guardrail
+      taskRef:
+        kind: Task
+        name: openshift-qa-eval
+      retries: 3
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
     # ================================================================
     # PHASE 2 - PROMOTE TO STAGING (reached only if phase 1 fully passed)
     # ================================================================
@@ -665,7 +713,7 @@ spec:
         - name: namespace
           value: $(params.target-namespace)
       runAfter:
-        - security-scan-guardrail
+        - openshift-qa-eval
       taskRef:
         kind: Task
         name: teardown-model

@@ -20,7 +20,7 @@ Build the UI from this repo (required for GPU inventory / Overview telemetry) an
 ./deploy-all.sh --skip-maas   # includes the intake UI build
 # or, intake UI only:
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-ui/deployment.yaml
-oc wait -n vllm --for=condition=Ready pod -l app=model-intake --timeout=120s
+oc wait -n vllm --for=condition=Ready pod -l app=model-intake --timeout=240s
 ```
 
 `deployment.yaml` points at the in-cluster ImageStream `vllm/model-intake-ui:latest`. `deploy-all.sh` creates that ImageStream and runs a binary Docker build from `model_onboarding_pipeline/model-intake-ui/`.
@@ -51,6 +51,7 @@ This is set as the default in the pipeline params and in the app's ConfigMap.
 - **App can't create PipelineRuns**: Check the `model-intake` ServiceAccount's RBAC (Role `model-intake-tekton`) grants `create`/`get`/`list`/`watch` on `pipelineruns.tekton.dev`. Check logs: `oc logs -n vllm deployment/model-intake`.
 - **approval-api-url must be in-cluster DNS**: The Task runs as a pod, not in your browser. Use `http://model-intake.<ns>.svc.cluster.local:8080`, not the public Route.
 - **SQLite is single-replica**: The app uses a PVC-backed SQLite file. Do not scale beyond 1 replica.
+- **Blank page while clicking menus**: The pod was OOMKilled at 256Mi. Keep the 1Gi memory limit and single gunicorn worker from `deployment.yaml`; do not scale replicas.
 - **Auto-approval**: If `approval-api-url` is left empty, the pipeline skips the human gate entirely. This is for dev/test only — never use in shared/production clusters.
 - **Plan stuck in pending**: A human must click Approve/Reject at `/plans/<plan_id>`. Nothing approves automatically. If `approval-timeout-seconds` expires, the pipeline fails.
 

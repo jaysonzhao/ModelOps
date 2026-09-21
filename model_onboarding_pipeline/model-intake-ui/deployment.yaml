@@ -192,12 +192,27 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+          command:
+            - gunicorn
+            - --bind
+            - 0.0.0.0:8080
+            - --workers
+            - "1"
+            - --threads
+            - "4"
+            - --timeout
+            - "120"
+            - --max-requests
+            - "80"
+            - --max-requests-jitter
+            - "20"
+            - wsgi:app
           resources:
             requests:
-              memory: "128Mi"
+              memory: "256Mi"
               cpu: "100m"
             limits:
-              memory: "256Mi"
+              memory: "1Gi"
               cpu: "500m"
           readinessProbe:
             httpGet:
@@ -205,12 +220,14 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 5
           livenessProbe:
             httpGet:
               path: /healthz
               port: 8080
-            initialDelaySeconds: 10
+            initialDelaySeconds: 20
             periodSeconds: 30
+            timeoutSeconds: 5
       volumes:
         - name: data
           persistentVolumeClaim:

@@ -44,4 +44,20 @@ def create_app():
         from datetime import datetime, timezone
         return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
 
+    @app.errorhandler(Exception)
+    def handle_unexpected(err):
+        from flask import render_template, request
+        from werkzeug.exceptions import HTTPException
+
+        if isinstance(err, HTTPException):
+            return err
+        app.logger.exception("unhandled error on %s", request.path)
+        if request.path.startswith("/approvals/api") or request.path.endswith("/api"):
+            return {"error": "internal error"}, 500
+        return render_template(
+            "error.html",
+            message="This page could not be loaded. Use the menu to try again.",
+            active_page="",
+        ), 500
+
     return app

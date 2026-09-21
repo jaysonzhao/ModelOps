@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -11,6 +12,8 @@ from app.config import PROMETHEUS_URL
 logger = logging.getLogger(__name__)
 
 TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+_TELEMETRY_CACHE = (0.0, None)
+_TELEMETRY_TTL = 20
 
 
 def _bearer_token():
@@ -68,6 +71,12 @@ def collect_gpu_telemetry():
     Values come from DCGM exporter via Prometheus. Missing metrics are omitted
     rather than filled with N/A so callers can fall back to scheduler data.
     """
+    global _TELEMETRY_CACHE
+    expires_at, cached = _TELEMETRY_CACHE
+    now = time.monotonic()
+    if cached is not None and expires_at > now:
+        return cached
+
     telemetry = {}
 
     def upsert(query, field):
@@ -106,6 +115,7 @@ def collect_gpu_telemetry():
     upsert("DCGM_FI_DEV_FB_RESERVED", "fb_reserved")
     upsert("DCGM_FI_DEV_GPU_TEMP", "temp")
     upsert("DCGM_FI_DEV_POWER_USAGE", "power")
+    _TELEMETRY_CACHE = (now + _TELEMETRY_TTL, telemetry)
     return telemetry
 
 

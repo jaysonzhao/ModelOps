@@ -55,6 +55,10 @@ def index():
         nodes = []
 
     telemetry = collect_gpu_telemetry()
+    try:
+        all_gpu_pods = list_gpu_pods()
+    except Exception:
+        all_gpu_pods = []
     gpu_rows = []
     total_allocated = 0
     total_capacity = 0
@@ -63,7 +67,7 @@ def index():
         info = get_node_gpu_info(node)
         physical_count = info["physical_gpu_count"]
         total_capacity += info["schedulable_gpu_count"]
-        workloads_by_gpu = _find_workloads_on_node(node.metadata.name, physical_count)
+        workloads_by_gpu = _find_workloads_on_node(node.metadata.name, physical_count, all_gpu_pods)
 
         for i in range(physical_count):
             telem = match_telemetry(telemetry, info["node_name"], i)
@@ -100,7 +104,7 @@ def index():
     if total_allocated == 0:
         # Fall back to scheduler slice count so the summary is never empty.
         try:
-            total_allocated = _count_running_gpu_requests()
+            total_allocated = _count_running_gpu_requests(all_gpu_pods)
         except Exception:
             total_allocated = 0
 
@@ -133,12 +137,13 @@ def _pod_gpu_request(pod):
     return total
 
 
-def _find_workloads_on_node(node_name, physical_count):
+def _find_workloads_on_node(node_name, physical_count, all_pods=None):
     by_gpu = {i: [] for i in range(max(physical_count, 1))}
-    try:
-        all_pods = list_gpu_pods()
-    except Exception:
-        return by_gpu
+    if all_pods is None:
+        try:
+            all_pods = list_gpu_pods()
+        except Exception:
+            return by_gpu
 
     round_robin = 0
     for pod in all_pods:
@@ -157,9 +162,11 @@ def _find_workloads_on_node(node_name, physical_count):
     return by_gpu
 
 
-def _count_running_gpu_requests():
+def _count_running_gpu_requests(pods=None):
     count = 0
-    for pod in list_gpu_pods():
+    if pods is None:
+        pods = list_gpu_pods()
+    for pod in pods:
         if pod.status.phase not in ("Running", "Pending"):
             continue
         count += _pod_gpu_request(pod)

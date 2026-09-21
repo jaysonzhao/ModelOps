@@ -15,4 +15,4 @@ EXPOSE 8080
 # /data is where the SQLite DB lives (mount a PVC there in the Deployment).
 ENV DB_PATH=/data/model-intake.db
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "--timeout", "120", "wsgi:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "4", "--timeout", "120", "--max-requests", "80", "--max-requests-jitter", "20", "wsgi:app"]

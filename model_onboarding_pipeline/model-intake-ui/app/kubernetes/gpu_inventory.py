@@ -1,14 +1,37 @@
 import logging
+import time
 
 from app.kubernetes.client import core_api
 
 logger = logging.getLogger(__name__)
 
+_CACHE = {}
+_CACHE_TTL_SECONDS = 20
+
+
+def _ttl_get(key):
+    entry = _CACHE.get(key)
+    if not entry:
+        return None
+    expires_at, value = entry
+    if expires_at <= time.monotonic():
+        _CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _ttl_set(key, value, ttl=_CACHE_TTL_SECONDS):
+    _CACHE[key] = (time.monotonic() + ttl, value)
+    return value
+
 
 def list_gpu_nodes():
+    cached = _ttl_get("gpu_nodes")
+    if cached is not None:
+        return cached
     try:
         nodes = core_api().list_node(label_selector="nvidia.com/gpu.present=true")
-        return nodes.items
+        return _ttl_set("gpu_nodes", nodes.items)
     except Exception as exc:
         logger.warning("list_gpu_nodes failed: %s", exc)
         return []
@@ -19,6 +42,10 @@ def get_node(name):
 
 
 def list_gpu_pods(namespace=None):
+    cache_key = ("gpu_pods", namespace or "*")
+    cached = _ttl_get(cache_key)
+    if cached is not None:
+        return cached
     try:
         if namespace:
             pods = core_api().list_namespaced_pod(namespace=namespace)
@@ -34,7 +61,7 @@ def list_gpu_pods(namespace=None):
             if "nvidia.com/gpu" in reqs:
                 gpu_pods.append(pod)
                 break
-    return gpu_pods
+    return _ttl_set(cache_key, gpu_pods)
 
 
 def parse_gpu_label_value(node, label_key, default="unknown"):

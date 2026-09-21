@@ -342,6 +342,9 @@ phase_intake_ui() {
   log "Phase 6: Model Intake UI"
   ensure_ns "$PIPELINE_NS"
   local ui_dir="$ROOT/model_onboarding_pipeline/model-intake-ui"
+  # deployment.yaml uses 1 gunicorn worker and a 1Gi memory limit.
+  # Overview/GPU Inventory list cluster pods; 256Mi + 2 workers OOMKills
+  # the pod and the Route returns a blank/502 page on menu clicks.
 
   if [[ "$SKIP_BUILD" -eq 0 ]]; then
     oc get is model-intake-ui -n "$PIPELINE_NS" >/dev/null 2>&1 || \
@@ -359,7 +362,7 @@ phase_intake_ui() {
   if [[ "$SKIP_BUILD" -eq 0 ]]; then
     oc rollout restart deployment/model-intake -n "$PIPELINE_NS" >/dev/null 2>&1 || true
   fi
-  wait_ready_label "$PIPELINE_NS" app=model-intake 180s
+  wait_ready_label "$PIPELINE_NS" app=model-intake 240s
   ok "Intake UI: https://$(oc get route -n "$PIPELINE_NS" model-intake -o jsonpath='{.spec.host}')"
 }
 
